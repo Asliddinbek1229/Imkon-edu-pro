@@ -4,6 +4,7 @@ from math import ceil
 
 from aiogram import F, Router, html, types
 from aiogram.enums import ButtonStyle
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
@@ -22,6 +23,11 @@ router = Router()
 ADMIN_PANEL_TEXT = "⚙️ Admin panel"
 ADMIN_COURSES_PER_PAGE = 5
 SKIP_TEXTS = {"skip", "o'tkazish", "otkazish", "-", "yo'q", "yoq"}
+REMOVE_TEXTS = {"remove", "o'chir", "ochir", "tozala", "clear"}
+DEFAULT_COURSE_AUTHOR = "Maqsudxon Mo'minxonov"
+DEFAULT_TARGET_EXAM = "DTM, Milliy Sertifikat, Attestatsiya"
+DEFAULT_ACCESS_TYPE = "Hayotbod"
+DEFAULT_SORT_ORDER = 100
 
 
 class AdminMenuCallback(CallbackData, prefix="adm"):
@@ -55,6 +61,20 @@ def format_price(price: int) -> str:
     return f"{price:,}".replace(",", " ") + " so'm"
 
 
+def format_dashboard_amount(amount: int | None) -> str:
+    if not amount:
+        return "0 so'm"
+    return format_price(int(amount))
+
+
+def format_date(value) -> str:
+    if not value:
+        return "-"
+    if hasattr(value, "strftime"):
+        return value.strftime("%d.%m.%Y %H:%M")
+    return str(value)
+
+
 def parse_positive_int(value: str, *, allow_zero: bool = True) -> int | None:
     normalized = value.replace(" ", "").replace("_", "").strip()
     if not normalized.isdigit():
@@ -65,6 +85,31 @@ def parse_positive_int(value: str, *, allow_zero: bool = True) -> int | None:
     if not allow_zero and number == 0:
         return None
     return number
+
+
+def parse_visibility(value: str) -> bool | None:
+    normalized = (value or "").strip().lower().replace("‘", "'").replace("`", "'")
+    yes_values = {"ha", "h", "yes", "y", "1", "true", "on", "ochiq", "faol", "ko'rinsin", "korinsin"}
+    no_values = {"yo'q", "yoq", "no", "n", "0", "false", "off", "yopiq", "yashir", "ko'rinmasin", "korinmasin"}
+    if normalized in yes_values:
+        return True
+    if normalized in no_values:
+        return False
+    return None
+
+
+def optional_course_text(value: str, default: str | None = None) -> str | None:
+    text = (value or "").strip()
+    if not text or text.lower() in SKIP_TEXTS:
+        return default
+    return text
+
+
+def nullable_course_text(value: str) -> str | None:
+    text = (value or "").strip()
+    if not text or text.lower() in SKIP_TEXTS or text.lower() in REMOVE_TEXTS:
+        return None
+    return text
 
 
 def admin_main_keyboard() -> InlineKeyboardMarkup:
@@ -86,6 +131,127 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def dashboard_status_label(status: str) -> str:
+    labels = {
+        "pending": "⏳ Kutilmoqda",
+        "approved": "✅ Tasdiqlangan",
+        "rejected": "❌ Rad etilgan",
+    }
+    return labels.get(status, status)
+
+
+def admin_dashboard_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔄 Yangilash",
+                    callback_data=AdminMenuCallback(section="dashboard").pack(),
+                    style=ButtonStyle.PRIMARY,
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📚 Kurslar",
+                    callback_data=AdminMenuCallback(section="courses").pack(),
+                    style=ButtonStyle.SUCCESS,
+                ),
+                InlineKeyboardButton(
+                    text="↩️ Admin panel",
+                    callback_data=AdminMenuCallback(section="main").pack(),
+                    style=ButtonStyle.PRIMARY,
+                ),
+            ],
+        ]
+    )
+
+
+async def admin_dashboard_text() -> str:
+    (
+        total_users,
+        registered_users,
+        blocked_users,
+        total_courses,
+        active_courses,
+        total_purchases,
+        pending_purchases,
+        approved_purchases,
+        rejected_purchases,
+        approved_amount,
+        pending_amount,
+        latest_purchases,
+        top_courses,
+    ) = await asyncio.gather(
+        db.count_users(),
+        db.count_registered_users(),
+        db.count_blocked_users(),
+        db.count_courses(),
+        db.count_active_courses(),
+        db.count_purchases(),
+        db.count_purchases("pending"),
+        db.count_purchases("approved"),
+        db.count_purchases("rejected"),
+        db.sum_purchases_amount("approved"),
+        db.sum_purchases_amount("pending"),
+        db.select_latest_purchases(limit=5),
+        db.select_top_courses_by_purchases(limit=5),
+    )
+
+    hidden_courses = max(total_courses - active_courses, 0)
+    unregistered_users = max(total_users - registered_users, 0)
+
+    lines = [
+        "📊 <b>ADMIN DASHBOARD</b>",
+        "",
+        "👥 <b>Foydalanuvchilar</b>",
+        f"Jami: <b>{total_users}</b>",
+        f"Ro'yxatdan o'tgan: <b>{registered_users}</b>",
+        f"Ro'yxatdan o'tmagan: <b>{unregistered_users}</b>",
+        f"Bloklangan: <b>{blocked_users}</b>",
+        "",
+        "📚 <b>Kurslar</b>",
+        f"Jami: <b>{total_courses}</b>",
+        f"Userlarga ko'rinadi: <b>{active_courses}</b>",
+        f"Yopiq: <b>{hidden_courses}</b>",
+        "",
+        "🛒 <b>Xaridlar</b>",
+        f"Jami: <b>{total_purchases}</b>",
+        f"⏳ Kutilmoqda: <b>{pending_purchases}</b>",
+        f"✅ Tasdiqlangan: <b>{approved_purchases}</b>",
+        f"❌ Rad etilgan: <b>{rejected_purchases}</b>",
+        "",
+        "💰 <b>Moliya</b>",
+        f"Tasdiqlangan tushum: <b>{format_dashboard_amount(approved_amount)}</b>",
+        f"Kutilayotgan summa: <b>{format_dashboard_amount(pending_amount)}</b>",
+        "",
+        "🏆 <b>Top kurslar</b>",
+    ]
+
+    courses_with_purchases = [course for course in top_courses if course["purchase_count"]]
+    if courses_with_purchases:
+        for index, course in enumerate(courses_with_purchases, start=1):
+            lines.append(
+                f"{index}. <b>{html.quote(course['name'])}</b> "
+                f"({course['purchase_count']} xarid, {format_dashboard_amount(course['revenue'])})"
+            )
+    else:
+        lines.append("Hali xaridlar yo'q.")
+
+    lines.extend(["", "🧾 <b>Oxirgi xaridlar</b>"])
+    if latest_purchases:
+        for purchase in latest_purchases:
+            buyer = purchase["full_name"] or str(purchase["telegram_id"])
+            lines.append(
+                f"#{purchase['id']} · {dashboard_status_label(purchase['status'])}\n"
+                f"<b>{html.quote(purchase['course_name'])}</b>\n"
+                f"{html.quote(buyer)} · {format_price(purchase['amount'])} · {format_date(purchase['created_at'])}"
+            )
+    else:
+        lines.append("Hali xaridlar yo'q.")
+
+    return "\n".join(lines)
 
 
 def admin_courses_text(courses: list, page: int, total: int) -> str:
@@ -188,7 +354,7 @@ def admin_course_detail_text(course) -> str:
 
 
 def admin_course_detail_keyboard(course) -> InlineKeyboardMarkup:
-    toggle_text = "🚫 Yopish" if course["is_active"] else "✅ Ko'rsatish"
+    status_button_text = "✅ Holat: ko'rinadi" if course["is_active"] else "🚫 Holat: yopiq"
     toggle_style = ButtonStyle.DANGER if course["is_active"] else ButtonStyle.SUCCESS
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -198,6 +364,13 @@ def admin_course_detail_keyboard(course) -> InlineKeyboardMarkup:
                     callback_data=AdminCourseEditCallback(field="name", course_id=course["id"]).pack(),
                     style=ButtonStyle.PRIMARY,
                 ),
+                InlineKeyboardButton(
+                    text=status_button_text,
+                    callback_data=AdminCourseActionCallback(action="toggle", course_id=course["id"]).pack(),
+                    style=toggle_style,
+                ),
+            ],
+            [
                 InlineKeyboardButton(
                     text="💰 Narx",
                     callback_data=AdminCourseEditCallback(field="price", course_id=course["id"]).pack(),
@@ -211,13 +384,32 @@ def admin_course_detail_keyboard(course) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="📝 Tavsif",
-                    callback_data=AdminCourseEditCallback(field="description", course_id=course["id"]).pack(),
+                    text="👨‍🏫 Muallif",
+                    callback_data=AdminCourseEditCallback(field="author", course_id=course["id"]).pack(),
                     style=ButtonStyle.PRIMARY,
                 ),
                 InlineKeyboardButton(
-                    text="🖼 Rasm",
-                    callback_data=AdminCourseEditCallback(field="thumbnail", course_id=course["id"]).pack(),
+                    text="⏱ Davomiylik",
+                    callback_data=AdminCourseEditCallback(field="duration", course_id=course["id"]).pack(),
+                    style=ButtonStyle.PRIMARY,
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🎯 Imtihon",
+                    callback_data=AdminCourseEditCallback(field="target_exam", course_id=course["id"]).pack(),
+                    style=ButtonStyle.PRIMARY,
+                ),
+                InlineKeyboardButton(
+                    text="✨ Qo'shimcha",
+                    callback_data=AdminCourseEditCallback(field="includes", course_id=course["id"]).pack(),
+                    style=ButtonStyle.PRIMARY,
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="♾ Kirish",
+                    callback_data=AdminCourseEditCallback(field="access_type", course_id=course["id"]).pack(),
                     style=ButtonStyle.PRIMARY,
                 ),
                 InlineKeyboardButton(
@@ -228,10 +420,22 @@ def admin_course_detail_keyboard(course) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text=toggle_text,
-                    callback_data=AdminCourseActionCallback(action="toggle", course_id=course["id"]).pack(),
-                    style=toggle_style,
+                    text="🔢 Sort",
+                    callback_data=AdminCourseEditCallback(field="sort_order", course_id=course["id"]).pack(),
+                    style=ButtonStyle.PRIMARY,
                 ),
+                InlineKeyboardButton(
+                    text="📝 Tavsif",
+                    callback_data=AdminCourseEditCallback(field="description", course_id=course["id"]).pack(),
+                    style=ButtonStyle.PRIMARY,
+                ),
+                InlineKeyboardButton(
+                    text="🖼 Rasm",
+                    callback_data=AdminCourseEditCallback(field="thumbnail", course_id=course["id"]).pack(),
+                    style=ButtonStyle.PRIMARY,
+                ),
+            ],
+            [
                 InlineKeyboardButton(
                     text="🗑 O'chirish",
                     callback_data=AdminCourseActionCallback(action="delete_ask", course_id=course["id"]).pack(),
@@ -260,6 +464,29 @@ async def edit_or_send_admin_menu(call: types.CallbackQuery) -> None:
         await call.message.answer("⚙️ <b>ADMIN PANEL</b>", reply_markup=admin_main_keyboard())
         return
     await call.message.edit_text("⚙️ <b>ADMIN PANEL</b>", reply_markup=admin_main_keyboard())
+
+
+async def render_admin_dashboard(call_or_message, answer: bool = True) -> None:
+    text = await admin_dashboard_text()
+    markup = admin_dashboard_keyboard()
+
+    if isinstance(call_or_message, types.CallbackQuery):
+        call = call_or_message
+        if answer:
+            await call.answer()
+        if call.message.photo:
+            await call.message.delete()
+            await call.message.answer(text, reply_markup=markup)
+            return
+        try:
+            await call.message.edit_text(text, reply_markup=markup)
+        except TelegramBadRequest as error:
+            if "message is not modified" in str(error):
+                return
+            raise
+        return
+
+    await call_or_message.answer(text, reply_markup=markup)
 
 
 async def render_admin_courses_list(call_or_message, page: int = 1, answer: bool = True) -> None:
@@ -328,7 +555,7 @@ async def admin_courses_callback(call: types.CallbackQuery):
 
 @router.callback_query(AdminMenuCallback.filter(F.section == "dashboard"), IsBotAdminFilter(ADMINS))
 async def admin_dashboard_placeholder(call: types.CallbackQuery):
-    await call.answer("Dashboard keyingi bosqichda ulanadi.", show_alert=True)
+    await render_admin_dashboard(call)
 
 
 @router.callback_query(AdminCoursePageCallback.filter(), IsBotAdminFilter(ADMINS))
@@ -346,7 +573,11 @@ async def admin_course_create_start(call: types.CallbackQuery, state: FSMContext
     await call.answer()
     await state.clear()
     await state.set_state(CourseAdminState.add_name)
-    await call.message.answer("➕ Yangi kurs nomini kiriting:\n\nMasalan: <b>6-botanika | Imkon-edu Pro</b>")
+    await call.message.answer(
+        "➕ <b>Yangi kurs qo'shish</b>\n\n"
+        "1/13. Kurs nomini kiriting:\n"
+        "Masalan: <b>6-botanika | Imkon-edu Pro</b>"
+    )
 
 
 @router.message(CourseAdminState.add_name, IsBotAdminFilter(ADMINS))
@@ -356,8 +587,19 @@ async def admin_course_add_name(message: types.Message, state: FSMContext):
         await message.answer("Kurs nomi 3-200 belgi oralig'ida bo'lishi kerak.")
         return
     await state.update_data(name=name)
+    await state.set_state(CourseAdminState.add_is_active)
+    await message.answer("2/13. Kurs userlarga ko'rinsinmi?\n\n<code>ha</code> yoki <code>yo'q</code> yozing.")
+
+
+@router.message(CourseAdminState.add_is_active, IsBotAdminFilter(ADMINS))
+async def admin_course_add_is_active(message: types.Message, state: FSMContext):
+    is_active = parse_visibility(message.text or "")
+    if is_active is None:
+        await message.answer("Holat uchun <code>ha</code> yoki <code>yo'q</code> yozing.")
+        return
+    await state.update_data(is_active=is_active)
     await state.set_state(CourseAdminState.add_price)
-    await message.answer("💰 Kurs narxini kiriting. Bepul kurs uchun <code>0</code> yozing.")
+    await message.answer("3/13. 💰 Kurs narxini kiriting. Bepul kurs uchun <code>0</code> yozing.")
 
 
 @router.message(CourseAdminState.add_price, IsBotAdminFilter(ADMINS))
@@ -368,7 +610,7 @@ async def admin_course_add_price(message: types.Message, state: FSMContext):
         return
     await state.update_data(price=price)
     await state.set_state(CourseAdminState.add_video_count)
-    await message.answer("📊 Video darslar sonini kiriting. Masalan: <code>12</code>")
+    await message.answer("4/13. 📊 Video darslar sonini kiriting. Masalan: <code>12</code>")
 
 
 @router.message(CourseAdminState.add_video_count, IsBotAdminFilter(ADMINS))
@@ -378,8 +620,92 @@ async def admin_course_add_video_count(message: types.Message, state: FSMContext
         await message.answer("Video soni faqat raqam bo'lishi kerak. Masalan: <code>12</code>")
         return
     await state.update_data(video_count=video_count)
+    await state.set_state(CourseAdminState.add_author)
+    await message.answer(
+        "5/13. 👨‍🏫 Muallifni kiriting.\n\n"
+        f"Standart qiymat uchun <code>skip</code>: <b>{html.quote(DEFAULT_COURSE_AUTHOR)}</b>"
+    )
+
+
+@router.message(CourseAdminState.add_author, IsBotAdminFilter(ADMINS))
+async def admin_course_add_author(message: types.Message, state: FSMContext):
+    author = optional_course_text(message.text or "", DEFAULT_COURSE_AUTHOR)
+    if not author or len(author) > 200:
+        await message.answer("Muallif 1-200 belgi oralig'ida bo'lishi kerak.")
+        return
+    await state.update_data(author=author)
+    await state.set_state(CourseAdminState.add_duration)
+    await message.answer("6/13. ⏱ Davomiylikni kiriting yoki bo'sh qoldirish uchun <code>skip</code> yozing.")
+
+
+@router.message(CourseAdminState.add_duration, IsBotAdminFilter(ADMINS))
+async def admin_course_add_duration(message: types.Message, state: FSMContext):
+    duration = optional_course_text(message.text or "")
+    if duration and len(duration) > 100:
+        await message.answer("Davomiylik 100 belgidan oshmasin.")
+        return
+    await state.update_data(duration=duration)
+    await state.set_state(CourseAdminState.add_target_exam)
+    await message.answer(
+        "7/13. 🎯 Imtihon yo'nalishlarini kiriting.\n\n"
+        f"Standart qiymat uchun <code>skip</code>: <b>{html.quote(DEFAULT_TARGET_EXAM)}</b>"
+    )
+
+
+@router.message(CourseAdminState.add_target_exam, IsBotAdminFilter(ADMINS))
+async def admin_course_add_target_exam(message: types.Message, state: FSMContext):
+    target_exam = optional_course_text(message.text or "", DEFAULT_TARGET_EXAM)
+    if target_exam and len(target_exam) > 200:
+        await message.answer("Imtihon matni 200 belgidan oshmasin.")
+        return
+    await state.update_data(target_exam=target_exam)
+    await state.set_state(CourseAdminState.add_includes)
+    await message.answer("8/13. ✨ Qo'shimcha tarkibni kiriting yoki bo'sh qoldirish uchun <code>skip</code> yozing.")
+
+
+@router.message(CourseAdminState.add_includes, IsBotAdminFilter(ADMINS))
+async def admin_course_add_includes(message: types.Message, state: FSMContext):
+    includes = optional_course_text(message.text or "")
+    await state.update_data(includes=includes)
+    await state.set_state(CourseAdminState.add_access_type)
+    await message.answer(
+        "9/13. ♾ Kirish turini kiriting.\n\n"
+        f"Standart qiymat uchun <code>skip</code>: <b>{html.quote(DEFAULT_ACCESS_TYPE)}</b>"
+    )
+
+
+@router.message(CourseAdminState.add_access_type, IsBotAdminFilter(ADMINS))
+async def admin_course_add_access_type(message: types.Message, state: FSMContext):
+    access_type = optional_course_text(message.text or "", DEFAULT_ACCESS_TYPE)
+    if not access_type or len(access_type) > 100:
+        await message.answer("Kirish turi 1-100 belgi oralig'ida bo'lishi kerak.")
+        return
+    await state.update_data(access_type=access_type)
+    await state.set_state(CourseAdminState.add_link)
+    await message.answer("10/13. 🔗 Kurs guruhi/linkini yuboring yoki bo'sh qoldirish uchun <code>skip</code> yozing.")
+
+
+@router.message(CourseAdminState.add_link, IsBotAdminFilter(ADMINS))
+async def admin_course_add_link(message: types.Message, state: FSMContext):
+    telegram_link = optional_course_text(message.text or "")
+    if telegram_link and len(telegram_link) > 500:
+        await message.answer("Guruh link 500 belgidan oshmasin.")
+        return
+    await state.update_data(telegram_link=telegram_link)
+    await state.set_state(CourseAdminState.add_sort_order)
+    await message.answer(f"11/13. 🔢 Sort tartibini kiriting. Standart uchun <code>skip</code>: <b>{DEFAULT_SORT_ORDER}</b>")
+
+
+@router.message(CourseAdminState.add_sort_order, IsBotAdminFilter(ADMINS))
+async def admin_course_add_sort_order(message: types.Message, state: FSMContext):
+    raw_sort_order = (message.text or "").strip()
+    sort_order = DEFAULT_SORT_ORDER if raw_sort_order.lower() in SKIP_TEXTS else parse_positive_int(raw_sort_order)
+    if sort_order is None:
+        await message.answer("Sort faqat raqam bo'lishi kerak. Masalan: <code>100</code>")
+        return
+    await state.update_data(sort_order=sort_order)
     await state.set_state(CourseAdminState.add_description)
-    await message.answer("📝 Kurs tavsifini yuboring.")
+    await message.answer("12/13. 📝 Kurs tavsifini yuboring.")
 
 
 @router.message(CourseAdminState.add_description, IsBotAdminFilter(ADMINS))
@@ -390,7 +716,7 @@ async def admin_course_add_description(message: types.Message, state: FSMContext
         return
     await state.update_data(description=description)
     await state.set_state(CourseAdminState.add_photo)
-    await message.answer("🖼 Kurs rasmini yuboring yoki o'tkazish uchun <code>skip</code> yozing.")
+    await message.answer("13/13. 🖼 Premium ko'rinish uchun kurs rasmini yuboring yoki o'tkazish uchun <code>skip</code> yozing.")
 
 
 @router.message(CourseAdminState.add_photo, IsBotAdminFilter(ADMINS))
@@ -403,14 +729,6 @@ async def admin_course_add_photo(message: types.Message, state: FSMContext):
         return
 
     await state.update_data(thumbnail=thumbnail)
-    await state.set_state(CourseAdminState.add_link)
-    await message.answer("🔗 Kurs guruhi/linkini yuboring yoki o'tkazish uchun <code>skip</code> yozing.")
-
-
-@router.message(CourseAdminState.add_link, IsBotAdminFilter(ADMINS))
-async def admin_course_add_link(message: types.Message, state: FSMContext):
-    raw_link = (message.text or "").strip()
-    telegram_link = None if not raw_link or raw_link.lower() in SKIP_TEXTS else raw_link
     data = await state.get_data()
 
     course = await db.add_course(
@@ -418,8 +736,15 @@ async def admin_course_add_link(message: types.Message, state: FSMContext):
         description=data["description"],
         price=data["price"],
         video_count=data["video_count"],
+        is_active=data["is_active"],
         thumbnail=data.get("thumbnail"),
-        telegram_link=telegram_link,
+        telegram_link=data.get("telegram_link"),
+        author=data["author"],
+        duration=data.get("duration"),
+        target_exam=data.get("target_exam"),
+        includes=data.get("includes"),
+        access_type=data["access_type"],
+        sort_order=data["sort_order"],
     )
     await state.clear()
     await message.answer(
@@ -502,11 +827,22 @@ async def admin_course_edit_start(
     if not course:
         await call.answer("Kurs topilmadi.", show_alert=True)
         return
+    if callback_data.field == "is_active":
+        await state.clear()
+        await db.set_course_active(course_id=course["id"], is_active=not course["is_active"])
+        await render_admin_course_detail(call, course_id=course["id"])
+        return
 
     field_titles = {
         "name": "yangi kurs nomini",
         "price": "yangi narxni",
         "video_count": "yangi video sonini",
+        "author": "yangi muallifni",
+        "duration": "yangi davomiylikni",
+        "target_exam": "yangi imtihon yo'nalishlarini",
+        "includes": "yangi qo'shimcha tarkibni",
+        "access_type": "yangi kirish turini",
+        "sort_order": "yangi sort tartibini",
         "description": "yangi tavsifni",
         "thumbnail": "yangi rasmni",
         "telegram_link": "yangi guruh/linkni",
@@ -518,6 +854,12 @@ async def admin_course_edit_start(
 
     if callback_data.field == "thumbnail":
         await call.message.answer("🖼 Yangi rasm yuboring. Rasmni o'chirish uchun <code>remove</code> yozing.")
+        return
+    if callback_data.field in {"duration", "target_exam", "includes", "telegram_link"}:
+        await call.message.answer(
+            f"✏️ {field_titles.get(callback_data.field, 'yangi qiymatni')} kiriting.\n"
+            "Maydonni tozalash uchun <code>remove</code> yozing."
+        )
         return
     await call.message.answer(f"✏️ {field_titles.get(callback_data.field, 'yangi qiymatni')} kiriting:")
 
@@ -536,18 +878,49 @@ async def admin_course_edit_value(message: types.Message, state: FSMContext):
         else:
             await message.answer("Rasm yuboring yoki <code>remove</code> yozing.")
             return
+    elif field == "is_active":
+        value = parse_visibility(message.text or "")
+        if value is None:
+            await message.answer("Holat uchun <code>ha</code> yoki <code>yo'q</code> yozing.")
+            return
     elif field in {"price", "video_count", "sort_order"}:
         value = parse_positive_int(message.text or "")
         if value is None:
             await message.answer("Bu maydon faqat raqam qabul qiladi.")
+            return
+    elif field in {"duration", "target_exam", "includes", "telegram_link"}:
+        value = nullable_course_text(message.text or "")
+        if value and field == "duration" and len(value) > 100:
+            await message.answer("Davomiylik 100 belgidan oshmasin.")
+            return
+        if value and field == "target_exam" and len(value) > 200:
+            await message.answer("Imtihon matni 200 belgidan oshmasin.")
+            return
+        if value and field == "telegram_link" and len(value) > 500:
+            await message.answer("Guruh link 500 belgidan oshmasin.")
             return
     else:
         value = (message.text or "").strip()
         if not value:
             await message.answer("Bo'sh qiymat qabul qilinmaydi.")
             return
+        if field == "name" and not 3 <= len(value) <= 200:
+            await message.answer("Kurs nomi 3-200 belgi oralig'ida bo'lishi kerak.")
+            return
+        if field == "description" and len(value) < 10:
+            await message.answer("Tavsif kamida 10 belgi bo'lishi kerak.")
+            return
+        if field == "author" and len(value) > 200:
+            await message.answer("Muallif 200 belgidan oshmasin.")
+            return
+        if field == "access_type" and len(value) > 100:
+            await message.answer("Kirish turi 100 belgidan oshmasin.")
+            return
 
-    course = await db.update_course_field(course_id=course_id, field_name=field, value=value)
+    if field == "is_active":
+        course = await db.set_course_active(course_id=course_id, is_active=value)
+    else:
+        course = await db.update_course_field(course_id=course_id, field_name=field, value=value)
     await state.clear()
     await message.answer(
         f"✅ Yangilandi: <b>{html.quote(course['name'])}</b>",

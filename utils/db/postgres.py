@@ -262,6 +262,14 @@ class Database:
         sql = "SELECT COUNT(*) FROM users"
         return await self.execute(sql, fetchval=True)
 
+    async def count_registered_users(self):
+        sql = "SELECT COUNT(*) FROM users WHERE is_registered = TRUE"
+        return await self.execute(sql, fetchval=True)
+
+    async def count_blocked_users(self):
+        sql = "SELECT COUNT(*) FROM users WHERE is_blocked = TRUE"
+        return await self.execute(sql, fetchval=True)
+
     async def update_user_username(self, username, telegram_id):
         # Foydalanuvchi username'ini yangilash
         sql = """
@@ -279,6 +287,54 @@ class Database:
     async def count_courses(self):
         sql = "SELECT COUNT(*) FROM courses"
         return await self.execute(sql, fetchval=True)
+
+    async def count_purchases(self, status: str | None = None):
+        if status is None:
+            sql = "SELECT COUNT(*) FROM purchases"
+            return await self.execute(sql, fetchval=True)
+        sql = "SELECT COUNT(*) FROM purchases WHERE status = $1"
+        return await self.execute(sql, status, fetchval=True)
+
+    async def sum_purchases_amount(self, status: str | None = None):
+        if status is None:
+            sql = "SELECT COALESCE(SUM(amount), 0) FROM purchases"
+            return await self.execute(sql, fetchval=True)
+        sql = "SELECT COALESCE(SUM(amount), 0) FROM purchases WHERE status = $1"
+        return await self.execute(sql, status, fetchval=True)
+
+    async def select_latest_purchases(self, limit: int = 5):
+        sql = """
+        SELECT
+            p.id,
+            p.amount,
+            p.status,
+            p.created_at,
+            c.name AS course_name,
+            u.full_name,
+            u.telegram_id
+        FROM purchases p
+        JOIN courses c ON c.id = p.course_id
+        JOIN users u ON u.id = p.user_id
+        ORDER BY p.created_at DESC, p.id DESC
+        LIMIT $1;
+        """
+        return await self.execute(sql, limit, fetch=True)
+
+    async def select_top_courses_by_purchases(self, limit: int = 5):
+        sql = """
+        SELECT
+            c.id,
+            c.name,
+            COUNT(p.id) AS purchase_count,
+            COUNT(p.id) FILTER (WHERE p.status = 'approved') AS approved_count,
+            COALESCE(SUM(p.amount) FILTER (WHERE p.status = 'approved'), 0) AS revenue
+        FROM courses c
+        LEFT JOIN purchases p ON p.course_id = c.id
+        GROUP BY c.id, c.name
+        ORDER BY purchase_count DESC, approved_count DESC, c.id ASC
+        LIMIT $1;
+        """
+        return await self.execute(sql, limit, fetch=True)
 
     async def select_active_courses_page(self, limit: int, offset: int):
         sql = """
@@ -321,13 +377,14 @@ class Database:
         includes: str | None = None,
         access_type: str = "Hayotbod",
         sort_order: int = 100,
+        is_active: bool = True,
     ):
         sql = """
         INSERT INTO courses (
             name, description, price, video_count, thumbnail, telegram_link,
-            author, duration, target_exam, includes, access_type, sort_order, updated_at
+            author, duration, target_exam, includes, access_type, sort_order, is_active, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
         RETURNING *;
         """
         return await self.execute(
@@ -344,6 +401,7 @@ class Database:
             includes,
             access_type,
             sort_order,
+            is_active,
             fetchrow=True,
         )
 
@@ -449,6 +507,7 @@ class Database:
             c.video_count AS course_video_count,
             c.access_type AS course_access_type,
             u.telegram_id,
+            u.username,
             u.full_name,
             u.phone
         FROM purchases p
@@ -457,6 +516,76 @@ class Database:
         WHERE p.id = $1;
         """
         return await self.execute(sql, purchase_id, fetchrow=True)
+
+    async def submit_purchase_receipt(
+        self,
+        purchase_id: int,
+        telegram_id: int,
+        receipt_file_id: str,
+        card_number_used: str | None = None,
+    ):
+        sql = """
+        UPDATE purchases p
+        SET receipt_file_id = $1,
+            card_number_used = $2,
+            status = 'pending',
+            admin_note = NULL,
+            rejected_at = NULL,
+            updated_at = NOW()
+        FROM users u
+        WHERE p.id = $3
+          AND p.user_id = u.id
+          AND u.telegram_id = $4
+          AND p.status != 'approved'
+        RETURNING p.id;
+        """
+        updated_id = await self.execute(
+            sql,
+            receipt_file_id,
+            card_number_used,
+            purchase_id,
+            telegram_id,
+            fetchval=True,
+        )
+        if not updated_id:
+            return None
+        return await self.select_purchase_by_id(updated_id)
+
+    async def approve_purchase(self, purchase_id: int, approved_by: int, invite_link: str, admin_note: str | None = None):
+        sql = """
+        UPDATE purchases
+        SET status = 'approved',
+            approved_by = $2,
+            invite_link = $3,
+            admin_note = $4,
+            approved_at = NOW(),
+            rejected_at = NULL,
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING id;
+        """
+        updated_id = await self.execute(sql, purchase_id, approved_by, invite_link, admin_note, fetchval=True)
+        if not updated_id:
+            return None
+        return await self.select_purchase_by_id(updated_id)
+
+    async def reject_purchase(self, purchase_id: int, rejected_by: int, admin_note: str):
+        sql = """
+        UPDATE purchases
+        SET status = 'rejected',
+            approved_by = $2,
+            invite_link = NULL,
+            admin_note = $3,
+            approved_at = NULL,
+            rejected_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING id;
+        """
+        updated_id = await self.execute(sql, purchase_id, rejected_by, admin_note, fetchval=True)
+        if not updated_id:
+            return None
+        return await self.select_purchase_by_id(updated_id)
 
     async def count_user_purchases(self, telegram_id: int):
         sql = """
@@ -505,6 +634,7 @@ class Database:
             c.video_count AS course_video_count,
             c.access_type AS course_access_type,
             u.telegram_id,
+            u.username,
             u.full_name,
             u.phone
         FROM purchases p

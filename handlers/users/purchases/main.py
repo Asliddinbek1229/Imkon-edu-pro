@@ -6,8 +6,10 @@ from math import ceil
 from aiogram import F, Router, html, types
 from aiogram.enums import ButtonStyle
 from aiogram.filters.callback_data import CallbackData
+from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from handlers.users.payment.main import PaymentActionCallback, render_payment_instructions
 from loader import db
 
 router = Router()
@@ -180,6 +182,18 @@ def purchase_detail_keyboard(purchase, page: int) -> InlineKeyboardMarkup:
             ]
         )
 
+    if purchase["status"] == "pending":
+        receipt_text = "📸 Chekni qayta yuborish" if purchase["receipt_file_id"] else "📸 Chek yuborish"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=receipt_text,
+                    callback_data=PaymentActionCallback(action="instructions", purchase_id=purchase["id"]).pack(),
+                    style=ButtonStyle.SUCCESS,
+                )
+            ]
+        )
+
     if purchase["status"] == "rejected":
         rows.append(
             [
@@ -294,7 +308,7 @@ async def my_purchase_catalog(call: types.CallbackQuery):
 
 
 @router.callback_query(MyPurchaseActionCallback.filter(F.action == "retry"))
-async def my_purchase_retry(call: types.CallbackQuery, callback_data: MyPurchaseActionCallback):
+async def my_purchase_retry(call: types.CallbackQuery, callback_data: MyPurchaseActionCallback, state: FSMContext):
     old_purchase = await db.select_user_purchase(call.from_user.id, callback_data.purchase_id)
     if not old_purchase:
         await call.answer("Xarid topilmadi.", show_alert=True)
@@ -305,5 +319,9 @@ async def my_purchase_retry(call: types.CallbackQuery, callback_data: MyPurchase
         await call.answer("Kurs topilmadi.", show_alert=True)
         return
 
-    await call.answer("Yangi xarid yaratildi.")
-    await render_purchase_detail(call, purchase_id=new_purchase["id"], page=callback_data.page, answer=False)
+    if new_purchase["status"] == "approved":
+        await call.answer("Kurs sizga biriktirildi.")
+        await render_purchase_detail(call, purchase_id=new_purchase["id"], page=callback_data.page, answer=False)
+        return
+
+    await render_payment_instructions(call=call, state=state, purchase=new_purchase)
