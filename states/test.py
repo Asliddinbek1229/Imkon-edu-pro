@@ -37,6 +37,10 @@ class CourseAdminState(StatesGroup):
     edit_value = State()
 
 
+class AdminSettingsState(StatesGroup):
+    awaiting_content = State()
+
+
 class AdminState(StatesGroup):
     are_you_sure = State()
     ask_ad_content = State()

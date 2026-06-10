@@ -54,6 +54,7 @@ class Database:
         await self.create_table_purchases()
         await self.ensure_purchases_columns()
         await self.create_table_user_access()
+        await self.create_table_settings()
 
     async def create_table_users(self):
         # Users jadvali
@@ -88,6 +89,33 @@ class Database:
         ]
         for query in alter_queries:
             await self.execute(query, execute=True)
+
+    async def create_table_settings(self):
+        sql = """
+        CREATE TABLE IF NOT EXISTS settings (
+            key VARCHAR(50) PRIMARY KEY,
+            text TEXT,
+            photo_file_id VARCHAR(500),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """
+        await self.execute(sql, execute=True)
+
+    async def get_setting(self, key: str):
+        sql = "SELECT * FROM settings WHERE key = $1"
+        return await self.execute(sql, key, fetchrow=True)
+
+    async def upsert_setting(self, key: str, text: str | None, photo_file_id: str | None):
+        sql = """
+        INSERT INTO settings (key, text, photo_file_id, updated_at)
+        VALUES ($1, $2, $3, NOW())
+        ON CONFLICT (key) DO UPDATE
+        SET text = EXCLUDED.text,
+            photo_file_id = EXCLUDED.photo_file_id,
+            updated_at = NOW()
+        RETURNING *;
+        """
+        return await self.execute(sql, key, text, photo_file_id, fetchrow=True)
 
     async def create_table_user_access(self):
         # User Access jadvali (legacy modulga moslik uchun qoldirilgan)

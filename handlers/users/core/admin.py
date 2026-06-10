@@ -21,7 +21,7 @@ from filters.admin import IsBotAdminFilter
 from handlers.users.core.start import main_menu_keyboard
 from keyboards.inline.buttons import are_you_sure_markup
 from loader import bot, db
-from states import AdminState, CourseAdminState
+from states import AdminSettingsState, AdminState, CourseAdminState
 from utils.pgtoexcel import export_to_excel
 
 logger = logging.getLogger(__name__)
@@ -61,6 +61,18 @@ class AdminCourseEditCallback(CallbackData, prefix="adce"):
     field: str
     course_id: int
     page: int = 1
+
+
+class AdminDashboardSectionCallback(CallbackData, prefix="adbs"):
+    section: str  # users | courses | sales
+
+
+class AdminSettingsCallback(CallbackData, prefix="adsets"):
+    action: str
+
+
+class AdminSettingEditCallback(CallbackData, prefix="adsete"):
+    key: str
 
 
 def format_price(price: int) -> str:
@@ -145,8 +157,75 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
                     style=ButtonStyle.PRIMARY,
                 )
             ],
+            [
+                InlineKeyboardButton(
+                    text="⚙️ Sozlamalar",
+                    callback_data=AdminMenuCallback(section="settings").pack(),
+                    style=ButtonStyle.PRIMARY,
+                )
+            ],
         ]
     )
+
+
+SETTINGS_KEYS = {
+    "faq": "❓ Yordam / FAQ",
+    "contact": "📞 Admin bilan bog'lanish",
+}
+
+
+def admin_settings_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"✏️ {label}",
+                callback_data=AdminSettingEditCallback(key=key).pack(),
+                style=ButtonStyle.PRIMARY,
+            )
+        ]
+        for key, label in SETTINGS_KEYS.items()
+    ]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="↩️ Admin panel",
+                callback_data=AdminMenuCallback(section="main").pack(),
+                style=ButtonStyle.PRIMARY,
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+_DASHBOARD_SECTIONS = [
+    ("users",   "👥 Foydalanuvchilar"),
+    ("courses", "📚 Kurslar"),
+    ("sales",   "🛒 Sotuvlar"),
+]
+
+
+def admin_dashboard_section_keyboard(active: str) -> InlineKeyboardMarkup:
+    tab_row = [
+        InlineKeyboardButton(
+            text=f"[ {label} ]" if s == active else label,
+            callback_data=AdminDashboardSectionCallback(section=s).pack(),
+            style=ButtonStyle.SUCCESS if s == active else ButtonStyle.PRIMARY,
+        )
+        for s, label in _DASHBOARD_SECTIONS
+    ]
+    bottom_row = [
+        InlineKeyboardButton(
+            text="🔄 Yangilash",
+            callback_data=AdminDashboardSectionCallback(section=active).pack(),
+            style=ButtonStyle.PRIMARY,
+        ),
+        InlineKeyboardButton(
+            text="↩️ Admin panel",
+            callback_data=AdminMenuCallback(section="main").pack(),
+            style=ButtonStyle.PRIMARY,
+        ),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[tab_row, bottom_row])
 
 
 def dashboard_status_label(status: str) -> str:
@@ -158,39 +237,40 @@ def dashboard_status_label(status: str) -> str:
     return labels.get(status, status)
 
 
-def admin_dashboard_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔄 Yangilash",
-                    callback_data=AdminMenuCallback(section="dashboard").pack(),
-                    style=ButtonStyle.PRIMARY,
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📚 Kurslar",
-                    callback_data=AdminMenuCallback(section="courses").pack(),
-                    style=ButtonStyle.SUCCESS,
-                ),
-                InlineKeyboardButton(
-                    text="↩️ Admin panel",
-                    callback_data=AdminMenuCallback(section="main").pack(),
-                    style=ButtonStyle.PRIMARY,
-                ),
-            ],
-        ]
+async def admin_dashboard_users_text() -> str:
+    total_users, registered_users, blocked_users = await asyncio.gather(
+        db.count_users(),
+        db.count_registered_users(),
+        db.count_blocked_users(),
     )
+    unregistered = max(total_users - registered_users, 0)
+    return "\n".join([
+        "👥 <b>FOYDALANUVCHILAR STATISTIKASI</b>",
+        "",
+        f"Jami: <b>{total_users}</b>",
+        f"✅ Ro'yxatdan o'tgan: <b>{registered_users}</b>",
+        f"⏳ Ro'yxatdan o'tmagan: <b>{unregistered}</b>",
+        f"🚫 Bloklangan: <b>{blocked_users}</b>",
+    ])
 
 
-async def admin_dashboard_text() -> str:
+async def admin_dashboard_courses_text() -> str:
+    total_courses, active_courses = await asyncio.gather(
+        db.count_courses(),
+        db.count_active_courses(),
+    )
+    hidden = max(total_courses - active_courses, 0)
+    return "\n".join([
+        "📚 <b>KURSLAR STATISTIKASI</b>",
+        "",
+        f"Jami kurslar: <b>{total_courses}</b>",
+        f"✅ Ko'rinadigan: <b>{active_courses}</b>",
+        f"🚫 Yopiq: <b>{hidden}</b>",
+    ])
+
+
+async def admin_dashboard_sales_text() -> str:
     (
-        total_users,
-        registered_users,
-        blocked_users,
-        total_courses,
-        active_courses,
         total_purchases,
         pending_purchases,
         approved_purchases,
@@ -200,11 +280,6 @@ async def admin_dashboard_text() -> str:
         latest_purchases,
         top_courses,
     ) = await asyncio.gather(
-        db.count_users(),
-        db.count_registered_users(),
-        db.count_blocked_users(),
-        db.count_courses(),
-        db.count_active_courses(),
         db.count_purchases(),
         db.count_purchases("pending"),
         db.count_purchases("approved"),
@@ -215,25 +290,10 @@ async def admin_dashboard_text() -> str:
         db.select_top_courses_by_purchases(limit=5),
     )
 
-    hidden_courses = max(total_courses - active_courses, 0)
-    unregistered_users = max(total_users - registered_users, 0)
-
     lines = [
-        "📊 <b>ADMIN DASHBOARD</b>",
+        "🛒 <b>SOTUVLAR STATISTIKASI</b>",
         "",
-        "👥 <b>Foydalanuvchilar</b>",
-        f"Jami: <b>{total_users}</b>",
-        f"Ro'yxatdan o'tgan: <b>{registered_users}</b>",
-        f"Ro'yxatdan o'tmagan: <b>{unregistered_users}</b>",
-        f"Bloklangan: <b>{blocked_users}</b>",
-        "",
-        "📚 <b>Kurslar</b>",
-        f"Jami: <b>{total_courses}</b>",
-        f"Userlarga ko'rinadi: <b>{active_courses}</b>",
-        f"Yopiq: <b>{hidden_courses}</b>",
-        "",
-        "🛒 <b>Xaridlar</b>",
-        f"Jami: <b>{total_purchases}</b>",
+        f"Jami xaridlar: <b>{total_purchases}</b>",
         f"⏳ Kutilmoqda: <b>{pending_purchases}</b>",
         f"✅ Tasdiqlangan: <b>{approved_purchases}</b>",
         f"❌ Rad etilgan: <b>{rejected_purchases}</b>",
@@ -244,30 +304,52 @@ async def admin_dashboard_text() -> str:
         "",
         "🏆 <b>Top kurslar</b>",
     ]
-
-    courses_with_purchases = [course for course in top_courses if course["purchase_count"]]
-    if courses_with_purchases:
-        for index, course in enumerate(courses_with_purchases, start=1):
+    top_with_sales = [c for c in top_courses if c["purchase_count"]]
+    if top_with_sales:
+        for i, c in enumerate(top_with_sales, 1):
             lines.append(
-                f"{index}. <b>{html.quote(course['name'])}</b> "
-                f"({course['purchase_count']} xarid, {format_dashboard_amount(course['revenue'])})"
+                f"{i}. <b>{html.quote(c['name'])}</b> "
+                f"({c['purchase_count']} xarid · {format_dashboard_amount(c['revenue'])})"
             )
     else:
         lines.append("Hali xaridlar yo'q.")
 
-    lines.extend(["", "🧾 <b>Oxirgi xaridlar</b>"])
+    lines.extend(["", "🧾 <b>Oxirgi 5 xarid</b>"])
     if latest_purchases:
-        for purchase in latest_purchases:
-            buyer = purchase["full_name"] or str(purchase["telegram_id"])
+        for p in latest_purchases:
+            buyer = p["full_name"] or str(p["telegram_id"])
             lines.append(
-                f"#{purchase['id']} · {dashboard_status_label(purchase['status'])}\n"
-                f"<b>{html.quote(purchase['course_name'])}</b>\n"
-                f"{html.quote(buyer)} · {format_price(purchase['amount'])} · {format_date(purchase['created_at'])}"
+                f"#{p['id']} · {dashboard_status_label(p['status'])}\n"
+                f"<b>{html.quote(p['course_name'])}</b>\n"
+                f"{html.quote(buyer)} · {format_price(p['amount'])} · {format_date(p['created_at'])}"
             )
     else:
         lines.append("Hali xaridlar yo'q.")
 
     return "\n".join(lines)
+
+
+async def get_dashboard_section_text(section: str) -> str:
+    if section == "courses":
+        return await admin_dashboard_courses_text()
+    if section == "sales":
+        return await admin_dashboard_sales_text()
+    return await admin_dashboard_users_text()
+
+
+async def render_dashboard_section(call: types.CallbackQuery, section: str) -> None:
+    await call.answer()
+    text = await get_dashboard_section_text(section)
+    markup = admin_dashboard_section_keyboard(section)
+    try:
+        if call.message.photo:
+            await call.message.delete()
+            await call.message.answer(text, reply_markup=markup)
+            return
+        await call.message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
 
 
 def admin_courses_text(courses: list, page: int, total: int) -> str:
@@ -482,9 +564,9 @@ async def edit_or_send_admin_menu(call: types.CallbackQuery) -> None:
     await call.message.edit_text("⚙️ <b>ADMIN PANEL</b>", reply_markup=admin_main_keyboard())
 
 
-async def render_admin_dashboard(call_or_message, answer: bool = True) -> None:
-    text = await admin_dashboard_text()
-    markup = admin_dashboard_keyboard()
+async def render_admin_dashboard(call_or_message, answer: bool = True, section: str = "users") -> None:
+    text = await get_dashboard_section_text(section)
+    markup = admin_dashboard_section_keyboard(section)
 
     if isinstance(call_or_message, types.CallbackQuery):
         call = call_or_message
@@ -569,9 +651,87 @@ async def admin_courses_callback(call: types.CallbackQuery):
     await render_admin_courses_list(call, page=1)
 
 
+@router.callback_query(AdminMenuCallback.filter(F.section == "settings"), IsBotAdminFilter(ADMINS))
+async def admin_settings_callback(call: types.CallbackQuery):
+    await call.answer()
+    text = (
+        "⚙️ <b>SOZLAMALAR</b>\n\n"
+        "Foydalanuvchilarga ko'rsatiladigan matnlarni tahrirlang.\n"
+        "Rasm + izoh yoki faqat matn yuboring."
+    )
+    if call.message.photo:
+        await call.message.delete()
+        await call.message.answer(text, reply_markup=admin_settings_keyboard())
+        return
+    await call.message.edit_text(text, reply_markup=admin_settings_keyboard())
+
+
+@router.callback_query(AdminSettingEditCallback.filter(), IsBotAdminFilter(ADMINS))
+async def admin_setting_edit_start(call: types.CallbackQuery, callback_data: AdminSettingEditCallback, state: FSMContext):
+    await call.answer()
+    key = callback_data.key
+    label = SETTINGS_KEYS.get(key, key)
+    current = await db.get_setting(key)
+
+    await state.clear()
+    await state.update_data(setting_key=key)
+    await state.set_state(AdminSettingsState.awaiting_content)
+
+    hint = ""
+    if current:
+        hint = "\n\n<i>Hozirgi kontent mavjud. Yangi xabar yuborsangiz, o'rnini egallaydi.</i>"
+
+    await call.message.answer(
+        f"✏️ <b>{label}</b> uchun yangi kontent yuboring.\n\n"
+        "📌 Qoidalar:\n"
+        "• Faqat matn → matn sifatida saqlanadi\n"
+        "• Rasm + izoh (caption) → rasm bilan saqlanadi\n"
+        "• <b>Bold</b>, <i>italic</i>, emoji — barchasi saqlanadi"
+        f"{hint}",
+        reply_markup=create_cancel_markup(),
+    )
+
+
+@router.message(StateFilter(AdminSettingsState.awaiting_content), IsBotAdminFilter(ADMINS))
+async def admin_setting_receive_content(message: types.Message, state: FSMContext):
+    if message.text and message.text.strip() == COURSE_CREATE_CANCEL_TEXT:
+        await state.clear()
+        await message.answer("❌ Bekor qilindi.", reply_markup=main_menu_keyboard(user_id=message.from_user.id))
+        await message.answer("⚙️ <b>SOZLAMALAR</b>", reply_markup=admin_settings_keyboard())
+        return
+
+    data = await state.get_data()
+    key = data.get("setting_key", "")
+    label = SETTINGS_KEYS.get(key, key)
+
+    if message.photo:
+        photo_file_id = message.photo[-1].file_id
+        text = message.caption_html or ""
+    elif message.text:
+        photo_file_id = None
+        text = message.html_text
+    else:
+        await message.answer("Faqat matn yoki rasm+izoh yuboring.")
+        return
+
+    await db.upsert_setting(key=key, text=text, photo_file_id=photo_file_id)
+    await state.clear()
+
+    await message.answer(
+        f"✅ <b>{label}</b> muvaffaqiyatli saqlandi.",
+        reply_markup=main_menu_keyboard(user_id=message.from_user.id),
+    )
+    await message.answer("⚙️ <b>SOZLAMALAR</b>", reply_markup=admin_settings_keyboard())
+
+
 @router.callback_query(AdminMenuCallback.filter(F.section == "dashboard"), IsBotAdminFilter(ADMINS))
 async def admin_dashboard_placeholder(call: types.CallbackQuery):
-    await render_admin_dashboard(call)
+    await render_admin_dashboard(call, section="users")
+
+
+@router.callback_query(AdminDashboardSectionCallback.filter(), IsBotAdminFilter(ADMINS))
+async def admin_dashboard_section(call: types.CallbackQuery, callback_data: AdminDashboardSectionCallback):
+    await render_dashboard_section(call, section=callback_data.section)
 
 
 @router.callback_query(AdminCoursePageCallback.filter(), IsBotAdminFilter(ADMINS))

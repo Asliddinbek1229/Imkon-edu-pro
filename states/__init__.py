@@ -1,1 +1,1 @@
-from .test import AdminState, CourseAdminState, PaymentReceiptState, ProfileEditState, RegistrationState, Test
+from .test import AdminSettingsState, AdminState, CourseAdminState, PaymentReceiptState, ProfileEditState, RegistrationState, Test
