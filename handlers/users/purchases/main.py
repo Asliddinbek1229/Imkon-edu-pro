@@ -11,7 +11,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from handlers.users.payment.main import PaymentActionCallback, render_payment_instructions
 from loader import db
-from utils.misc.api.course_payment import create_course_payment
+from utils.misc.api.course_payment import check_order_status, create_course_payment
 
 router = Router()
 
@@ -233,7 +233,21 @@ def purchase_detail_keyboard(purchase, page: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+async def sync_pending_click_purchases(telegram_id: int) -> None:
+    """Pending CLICK xaridlarini Django dan tekshirib avtomatik approve qiladi."""
+    pending = await db.get_pending_click_purchases(telegram_id)
+    for row in pending:
+        order_data = await check_order_status(row["click_order_id"])
+        if order_data and order_data.get("paid"):
+            invite_link = order_data.get("course_link") or None
+            await db.approve_click_purchase(
+                click_order_id=row["click_order_id"],
+                invite_link=invite_link,
+            )
+
+
 async def render_purchases(message: types.Message, page: int = 1) -> None:
+    await sync_pending_click_purchases(message.from_user.id)
     total = await db.count_user_purchases(message.from_user.id)
     total_pages = max(ceil(total / PURCHASES_PER_PAGE), 1)
     page = min(max(page, 1), total_pages)
@@ -247,6 +261,7 @@ async def render_purchases(message: types.Message, page: int = 1) -> None:
 
 
 async def edit_or_send_purchases(call: types.CallbackQuery, page: int = 1, answer: bool = True) -> None:
+    await sync_pending_click_purchases(call.from_user.id)
     total = await db.count_user_purchases(call.from_user.id)
     total_pages = max(ceil(total / PURCHASES_PER_PAGE), 1)
     page = min(max(page, 1), total_pages)
@@ -275,6 +290,17 @@ async def render_purchase_detail(
         await call.answer("Xarid topilmadi.", show_alert=True)
         await edit_or_send_purchases(call, page=page, answer=False)
         return
+
+    # Agar pending CLICK xaridi bo'lsa — Django dan yangilash
+    if purchase["status"] == "pending" and purchase.get("click_order_id"):
+        order_data = await check_order_status(purchase["click_order_id"])
+        if order_data and order_data.get("paid"):
+            updated = await db.approve_click_purchase(
+                click_order_id=purchase["click_order_id"],
+                invite_link=order_data.get("course_link") or None,
+            )
+            if updated:
+                purchase = updated
 
     if answer:
         await call.answer()

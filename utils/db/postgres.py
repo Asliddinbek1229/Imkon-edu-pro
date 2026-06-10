@@ -533,16 +533,28 @@ class Database:
         sql = """
         UPDATE purchases
         SET status = 'approved',
-            invite_link = $2,
+            invite_link = COALESCE($2, invite_link),
             approved_at = NOW(),
             updated_at = NOW()
         WHERE click_order_id = $1 AND status = 'pending'
         RETURNING id;
         """
-        purchase_id = await self.execute(sql, click_order_id, invite_link, fetchval=True)
+        purchase_id = await self.execute(sql, click_order_id, invite_link or None, fetchval=True)
         if not purchase_id:
             return None
         return await self.select_purchase_by_id(purchase_id)
+
+    async def get_pending_click_purchases(self, telegram_id: int) -> list:
+        sql = """
+        SELECT p.id, p.click_order_id
+        FROM purchases p
+        JOIN users u ON u.id = p.user_id
+        WHERE u.telegram_id = $1
+          AND p.status = 'pending'
+          AND p.click_order_id IS NOT NULL
+        ORDER BY p.id DESC;
+        """
+        return await self.execute(sql, telegram_id, fetch=True)
 
     async def select_active_purchase_for_course(self, user_id: int, course_id: int):
         sql = """
