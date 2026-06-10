@@ -8,9 +8,9 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
 
-from handlers.users.payment.main import render_payment_instructions
 from handlers.users.purchases.main import MyPurchaseDetailCallback, MyPurchasesPageCallback
 from loader import db
+from utils.misc.api.course_payment import create_course_payment
 
 router = Router()
 
@@ -291,52 +291,92 @@ async def catalog_buy(call: types.CallbackQuery, callback_data: CatalogActionCal
         await call.answer("Kurs topilmadi yoki vaqtincha yopilgan.", show_alert=True)
         return
 
-    purchase = await db.create_pending_purchase(call.from_user.id, course["id"])
-    if not purchase:
-        await call.answer("Avval ro'yxatdan o'ting: /start", show_alert=True)
-        return
+    await state.clear()
 
-    if purchase["status"] == "approved":
+    if course["price"] <= 0:
+        # Bepul kurs: darhol tasdiqlash
+        purchase = await db.create_pending_purchase(call.from_user.id, course["id"])
+        if not purchase:
+            await call.answer("Avval ro'yxatdan o'ting: /start", show_alert=True)
+            return
+
+        await call.answer("Kurs biriktirildi.")
         text = (
             "✅ <b>Kurs sizga biriktirildi.</b>\n\n"
-            f"Kurs: <b>{html.quote(purchase['course_name'])}</b>\n"
+            f"📚 Kurs: <b>{html.quote(purchase['course_name'])}</b>\n"
             "Holat: ✅ Faol\n\n"
-            "Kursni “Mening sotib olganlarim” bo'limidan ko'rishingiz mumkin."
+            "Kursni 'Mening sotib olganlarim' bo'limidan ko'rishingiz mumkin."
         )
-    elif purchase["amount"] > 0:
-        await render_payment_instructions(call=call, state=state, purchase=purchase)
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="🛒 Xaridni ko'rish",
+                        callback_data=MyPurchaseDetailCallback(purchase_id=purchase["id"], page=1).pack(),
+                        style=ButtonStyle.SUCCESS,
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="📚 Katalogga qaytish",
+                        callback_data=CatalogPageCallback(page=callback_data.page).pack(),
+                        style=ButtonStyle.PRIMARY,
+                    )
+                ],
+            ]
+        )
+        if call.message.photo:
+            await call.message.delete()
+            await call.message.answer(text, reply_markup=markup)
+            return
+        await call.message.edit_text(text, reply_markup=markup)
         return
-    else:
-        text = (
-            "✅ <b>Xarid yaratildi.</b>\n\n"
-            f"Kurs: <b>{html.quote(purchase['course_name'])}</b>\n"
-            f"Summa: <b>{format_price(purchase['amount'])}</b>\n"
-            "Holat: ⏳ Tekshirilmoqda\n\n"
-            "Keyingi bosqichda to'lov cheki yuborish ulanadi. Xarid holatini "
-            "“Mening sotib olganlarim” bo'limidan kuzatishingiz mumkin."
-        )
 
-    await call.answer("Xarid saqlandi.")
+    # Pullik kurs: CLICK to'lov
+    await call.answer("To'lov sahifasi tayyorlanmoqda…")
+    result = await create_course_payment(
+        tg_id=call.from_user.id,
+        course_id=course["id"],
+        course_name=course["name"],
+        course_link=course["telegram_link"] or "",
+        amount=course["price"],
+    )
+
+    if not result or not result.get("payment_url"):
+        text = (
+            "⚠️ <b>To'lov tizimida xatolik yuz berdi.</b>\n\n"
+            "Iltimos, keyinroq qayta urinib ko'ring yoki admin bilan bog'laning."
+        )
+        if call.message.photo:
+            await call.message.delete()
+            await call.message.answer(text)
+            return
+        await call.message.edit_text(text)
+        return
+
+    payment_url = result["payment_url"]
+    amount_str = format_price(course["price"])
+    text = (
+        "💳 <b>CLICK orqali to'lov</b>\n\n"
+        f"📚 Kurs: <b>{html.quote(course['name'])}</b>\n"
+        f"💰 Summa: <b>{amount_str}</b>\n\n"
+        "Pastdagi tugmani bosib to'lovni amalga oshiring.\n"
+        "To'lov tasdiqlangach, kurs linki <b>avtomatik</b> yuboriladi."
+    )
     markup = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🛒 Xaridni ko'rish",
-                    callback_data=MyPurchaseDetailCallback(purchase_id=purchase["id"], page=1).pack(),
-                    style=ButtonStyle.SUCCESS,
+                    text="💳 CLICK orqali to'lash",
+                    url=payment_url,
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="📚 Katalogga qaytish",
-                    callback_data=CatalogPageCallback(page=callback_data.page).pack(),
-                    style=ButtonStyle.PRIMARY,
-                ),
-                InlineKeyboardButton(
-                    text="🛒 Barcha xaridlar",
-                    callback_data=MyPurchasesPageCallback(page=1).pack(),
-                    style=ButtonStyle.PRIMARY,
-                ),
+                    text="❌ Bekor qilish",
+                    callback_data=CatalogActionCallback(action="cancel").pack(),
+                    style=ButtonStyle.DANGER,
+                )
             ],
         ]
     )

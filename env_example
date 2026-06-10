@@ -1,21 +1,16 @@
-# YANGI .env FAYL YARATING VA
-# QUYIDAGI MA'LUMOTLARNI YOZING:
-
-ADMINS=12345678,12345677,12345676
-BOT_TOKEN=123452345243:ABshDlsFIjklL
+ADMINS=123456789
+BOT_TOKEN=1234567890:ABCDEfghIJKLmnoPQRSTuvwxYZ
 
 
 # PostgreSQL
 DB_USER=postgres
-DB_PASS=1234567
-DB_NAME=telegram_bot
+DB_PASS=yourpassword
+DB_NAME=imkon-edu-pro
 DB_HOST=localhost
 
 
-# To'lov sozlamalari
-PAYMENT_CARD_NUMBER=8600123412341234
-PAYMENT_CARD_OWNER=IMKON EDU PRO
-PAYMENT_BANK_NAME=Uzcard / Humo
-# To'lov cheklarini tasdiqlash guruhi chat ID si. Bot guruhga admin qilib qo'shilgan bo'lishi kerak.
-PAYMENT_APPROVAL_CHAT_ID=-1001234567890
-PAYMENT_SUPPORT_USERNAME=@imkon_edu_admin
+# CLICK to'lov (imkon-edu-web API)
+# Production serveringiz URL manzili
+COURSE_PAYMENT_API_BASE=https://your-domain.uz/api/v1
+# imkon-edu-web BOT_PRO_INTEGRATION_KEY bilan bir xil bo'lishi kerak
+COURSE_INTEGRATION_KEY=your-secret-integration-key

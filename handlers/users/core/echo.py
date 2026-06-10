@@ -8,4 +8,4 @@ router = Router()
 
 @router.message()
 async def echo(message: Message):
-    await message.replay(message.text)
+    await message.reply(message.text)

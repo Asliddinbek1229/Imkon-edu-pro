@@ -5,13 +5,20 @@ from math import ceil
 from aiogram import F, Router, html, types
 from aiogram.enums import ButtonStyle
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
-from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 
 from data.config import ADMINS
 from filters.admin import IsBotAdminFilter
+from handlers.users.core.start import main_menu_keyboard
 from keyboards.inline.buttons import are_you_sure_markup
 from loader import bot, db
 from states import AdminState, CourseAdminState
@@ -21,6 +28,7 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 ADMIN_PANEL_TEXT = "⚙️ Admin panel"
+COURSE_CREATE_CANCEL_TEXT = "❌ Bekor qilish"
 ADMIN_COURSES_PER_PAGE = 5
 SKIP_TEXTS = {"skip", "o'tkazish", "otkazish", "-", "yo'q", "yoq"}
 REMOVE_TEXTS = {"remove", "o'chir", "ochir", "tozala", "clear"}
@@ -110,6 +118,14 @@ def nullable_course_text(value: str) -> str | None:
     if not text or text.lower() in SKIP_TEXTS or text.lower() in REMOVE_TEXTS:
         return None
     return text
+
+
+def create_cancel_markup() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=COURSE_CREATE_CANCEL_TEXT)]],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
 
 def admin_main_keyboard() -> InlineKeyboardMarkup:
@@ -576,8 +592,19 @@ async def admin_course_create_start(call: types.CallbackQuery, state: FSMContext
     await call.message.answer(
         "➕ <b>Yangi kurs qo'shish</b>\n\n"
         "1/13. Kurs nomini kiriting:\n"
-        "Masalan: <b>6-botanika | Imkon-edu Pro</b>"
+        "Masalan: <b>6-botanika | Imkon-edu Pro</b>",
+        reply_markup=create_cancel_markup(),
     )
+
+
+@router.message(StateFilter(CourseAdminState), F.text == COURSE_CREATE_CANCEL_TEXT, IsBotAdminFilter(ADMINS))
+async def admin_course_create_cancel(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "❌ Kurs qo'shish bekor qilindi.",
+        reply_markup=main_menu_keyboard(user_id=message.from_user.id),
+    )
+    await render_admin_courses_list(message, page=1)
 
 
 @router.message(CourseAdminState.add_name, IsBotAdminFilter(ADMINS))
@@ -588,7 +615,10 @@ async def admin_course_add_name(message: types.Message, state: FSMContext):
         return
     await state.update_data(name=name)
     await state.set_state(CourseAdminState.add_is_active)
-    await message.answer("2/13. Kurs userlarga ko'rinsinmi?\n\n<code>ha</code> yoki <code>yo'q</code> yozing.")
+    await message.answer(
+        "2/13. Kurs userlarga ko'rinsinmi?\n\n<code>ha</code> yoki <code>yo'q</code> yozing.",
+        reply_markup=create_cancel_markup(),
+    )
 
 
 @router.message(CourseAdminState.add_is_active, IsBotAdminFilter(ADMINS))
@@ -599,7 +629,10 @@ async def admin_course_add_is_active(message: types.Message, state: FSMContext):
         return
     await state.update_data(is_active=is_active)
     await state.set_state(CourseAdminState.add_price)
-    await message.answer("3/13. 💰 Kurs narxini kiriting. Bepul kurs uchun <code>0</code> yozing.")
+    await message.answer(
+        "3/13. 💰 Kurs narxini kiriting. Bepul kurs uchun <code>0</code> yozing.",
+        reply_markup=create_cancel_markup(),
+    )
 
 
 @router.message(CourseAdminState.add_price, IsBotAdminFilter(ADMINS))
@@ -610,7 +643,10 @@ async def admin_course_add_price(message: types.Message, state: FSMContext):
         return
     await state.update_data(price=price)
     await state.set_state(CourseAdminState.add_video_count)
-    await message.answer("4/13. 📊 Video darslar sonini kiriting. Masalan: <code>12</code>")
+    await message.answer(
+        "4/13. 📊 Video darslar sonini kiriting. Masalan: <code>12</code>",
+        reply_markup=create_cancel_markup(),
+    )
 
 
 @router.message(CourseAdminState.add_video_count, IsBotAdminFilter(ADMINS))
@@ -623,7 +659,8 @@ async def admin_course_add_video_count(message: types.Message, state: FSMContext
     await state.set_state(CourseAdminState.add_author)
     await message.answer(
         "5/13. 👨‍🏫 Muallifni kiriting.\n\n"
-        f"Standart qiymat uchun <code>skip</code>: <b>{html.quote(DEFAULT_COURSE_AUTHOR)}</b>"
+        f"Standart qiymat uchun <code>skip</code>: <b>{html.quote(DEFAULT_COURSE_AUTHOR)}</b>",
+        reply_markup=create_cancel_markup(),
     )
 
 
@@ -635,7 +672,10 @@ async def admin_course_add_author(message: types.Message, state: FSMContext):
         return
     await state.update_data(author=author)
     await state.set_state(CourseAdminState.add_duration)
-    await message.answer("6/13. ⏱ Davomiylikni kiriting yoki bo'sh qoldirish uchun <code>skip</code> yozing.")
+    await message.answer(
+        "6/13. ⏱ Davomiylikni kiriting yoki bo'sh qoldirish uchun <code>skip</code> yozing.",
+        reply_markup=create_cancel_markup(),
+    )
 
 
 @router.message(CourseAdminState.add_duration, IsBotAdminFilter(ADMINS))
@@ -648,7 +688,8 @@ async def admin_course_add_duration(message: types.Message, state: FSMContext):
     await state.set_state(CourseAdminState.add_target_exam)
     await message.answer(
         "7/13. 🎯 Imtihon yo'nalishlarini kiriting.\n\n"
-        f"Standart qiymat uchun <code>skip</code>: <b>{html.quote(DEFAULT_TARGET_EXAM)}</b>"
+        f"Standart qiymat uchun <code>skip</code>: <b>{html.quote(DEFAULT_TARGET_EXAM)}</b>",
+        reply_markup=create_cancel_markup(),
     )
 
 
@@ -660,7 +701,10 @@ async def admin_course_add_target_exam(message: types.Message, state: FSMContext
         return
     await state.update_data(target_exam=target_exam)
     await state.set_state(CourseAdminState.add_includes)
-    await message.answer("8/13. ✨ Qo'shimcha tarkibni kiriting yoki bo'sh qoldirish uchun <code>skip</code> yozing.")
+    await message.answer(
+        "8/13. ✨ Qo'shimcha tarkibni kiriting yoki bo'sh qoldirish uchun <code>skip</code> yozing.",
+        reply_markup=create_cancel_markup(),
+    )
 
 
 @router.message(CourseAdminState.add_includes, IsBotAdminFilter(ADMINS))
@@ -670,7 +714,8 @@ async def admin_course_add_includes(message: types.Message, state: FSMContext):
     await state.set_state(CourseAdminState.add_access_type)
     await message.answer(
         "9/13. ♾ Kirish turini kiriting.\n\n"
-        f"Standart qiymat uchun <code>skip</code>: <b>{html.quote(DEFAULT_ACCESS_TYPE)}</b>"
+        f"Standart qiymat uchun <code>skip</code>: <b>{html.quote(DEFAULT_ACCESS_TYPE)}</b>",
+        reply_markup=create_cancel_markup(),
     )
 
 
@@ -682,7 +727,10 @@ async def admin_course_add_access_type(message: types.Message, state: FSMContext
         return
     await state.update_data(access_type=access_type)
     await state.set_state(CourseAdminState.add_link)
-    await message.answer("10/13. 🔗 Kurs guruhi/linkini yuboring yoki bo'sh qoldirish uchun <code>skip</code> yozing.")
+    await message.answer(
+        "10/13. 🔗 Kurs guruhi/linkini yuboring yoki bo'sh qoldirish uchun <code>skip</code> yozing.",
+        reply_markup=create_cancel_markup(),
+    )
 
 
 @router.message(CourseAdminState.add_link, IsBotAdminFilter(ADMINS))
@@ -693,7 +741,10 @@ async def admin_course_add_link(message: types.Message, state: FSMContext):
         return
     await state.update_data(telegram_link=telegram_link)
     await state.set_state(CourseAdminState.add_sort_order)
-    await message.answer(f"11/13. 🔢 Sort tartibini kiriting. Standart uchun <code>skip</code>: <b>{DEFAULT_SORT_ORDER}</b>")
+    await message.answer(
+        f"11/13. 🔢 Sort tartibini kiriting. Standart uchun <code>skip</code>: <b>{DEFAULT_SORT_ORDER}</b>",
+        reply_markup=create_cancel_markup(),
+    )
 
 
 @router.message(CourseAdminState.add_sort_order, IsBotAdminFilter(ADMINS))
@@ -705,7 +756,10 @@ async def admin_course_add_sort_order(message: types.Message, state: FSMContext)
         return
     await state.update_data(sort_order=sort_order)
     await state.set_state(CourseAdminState.add_description)
-    await message.answer("12/13. 📝 Kurs tavsifini yuboring.")
+    await message.answer(
+        "12/13. 📝 Kurs tavsifini yuboring.",
+        reply_markup=create_cancel_markup(),
+    )
 
 
 @router.message(CourseAdminState.add_description, IsBotAdminFilter(ADMINS))
@@ -716,7 +770,10 @@ async def admin_course_add_description(message: types.Message, state: FSMContext
         return
     await state.update_data(description=description)
     await state.set_state(CourseAdminState.add_photo)
-    await message.answer("13/13. 🖼 Premium ko'rinish uchun kurs rasmini yuboring yoki o'tkazish uchun <code>skip</code> yozing.")
+    await message.answer(
+        "13/13. 🖼 Premium ko'rinish uchun kurs rasmini yuboring yoki o'tkazish uchun <code>skip</code> yozing.",
+        reply_markup=create_cancel_markup(),
+    )
 
 
 @router.message(CourseAdminState.add_photo, IsBotAdminFilter(ADMINS))
