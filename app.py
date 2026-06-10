@@ -2,7 +2,7 @@ import asyncio
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.middlewares.request_logging import logger
-from loader import db  # Ma'lumotlar bazasi moduli
+from loader import db
 
 
 def setup_handlers(dispatcher: Dispatcher) -> None:
@@ -44,12 +44,27 @@ async def database_connected():
     await db.initialize_tables()
 
 
+async def start_payment_server() -> None:
+    from aiohttp import web
+    from utils.misc.payment_server import make_payment_app
+    from data.config import BOT_PAYMENT_SERVER_PORT
+
+    app = make_payment_app()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", BOT_PAYMENT_SERVER_PORT)
+    await site.start()
+    logger.info("Payment server started on port %s", BOT_PAYMENT_SERVER_PORT)
+
+
 async def aiogram_on_startup_polling(dispatcher: Dispatcher, bot: Bot) -> None:
     from utils.set_bot_commands import set_default_commands
     from utils.notify_admins import on_startup_notify
 
     logger.info("Database connected")
     await database_connected()
+
+    asyncio.create_task(start_payment_server())
 
     logger.info("Starting polling")
     await bot.delete_webhook(drop_pending_updates=True)

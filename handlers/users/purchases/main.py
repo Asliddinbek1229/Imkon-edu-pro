@@ -146,10 +146,16 @@ def purchase_detail_text(purchase) -> str:
             "Guruhga kirgach pinned postni o'qing va darslarni tartib bilan o'rganing."
         )
     elif purchase["status"] == "pending":
-        approved_line = (
-            "\n⏳ <b>To'lov tekshirilmoqda.</b>\n"
-            "Admin tasdiqlagach kurs linki avtomatik ko'rinadi."
-        )
+        if purchase.get("click_order_id"):
+            approved_line = (
+                "\n⏳ <b>CLICK to'lov kutilmoqda.</b>\n"
+                "To'lov tasdiqlangach kurs linki avtomatik yuboriladi."
+            )
+        else:
+            approved_line = (
+                "\n⏳ <b>To'lov tekshirilmoqda.</b>\n"
+                "Admin tasdiqlagach kurs linki avtomatik ko'rinadi."
+            )
     elif purchase["status"] == "rejected":
         approved_line = "\n❌ <b>To'lov rad etilgan.</b> Qayta sotib olish mumkin."
 
@@ -183,7 +189,7 @@ def purchase_detail_keyboard(purchase, page: int) -> InlineKeyboardMarkup:
             ]
         )
 
-    if purchase["status"] == "pending":
+    if purchase["status"] == "pending" and not purchase.get("click_order_id"):
         receipt_text = "📸 Chekni qayta yuborish" if purchase["receipt_file_id"] else "📸 Chek yuborish"
         rows.append(
             [
@@ -343,6 +349,13 @@ async def my_purchase_retry(call: types.CallbackQuery, callback_data: MyPurchase
     if not result or not result.get("payment_url"):
         await call.answer("To'lov tizimida xatolik. Qayta urinib ko'ring.", show_alert=True)
         return
+
+    await db.create_click_pending_purchase(
+        telegram_id=call.from_user.id,
+        course_id=course["id"],
+        click_order_id=result["order_id"],
+        amount=course["price"],
+    )
 
     payment_url = result["payment_url"]
     text = (

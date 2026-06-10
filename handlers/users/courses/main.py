@@ -354,6 +354,13 @@ async def catalog_buy(call: types.CallbackQuery, callback_data: CatalogActionCal
         await call.message.edit_text(text)
         return
 
+    await db.create_click_pending_purchase(
+        telegram_id=call.from_user.id,
+        course_id=course["id"],
+        click_order_id=result["order_id"],
+        amount=course["price"],
+    )
+
     payment_url = result["payment_url"]
     amount_str = format_price(course["price"])
     text = (

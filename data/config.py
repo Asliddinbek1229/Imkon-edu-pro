@@ -18,3 +18,7 @@ DB_HOST = env.str("DB_HOST")
 COURSE_PAYMENT_API_BASE = env.str("COURSE_PAYMENT_API_BASE", default="http://localhost:8000/api")
 COURSE_INTEGRATION_KEY = env.str("COURSE_INTEGRATION_KEY", default="")
 
+# Ichki HTTP server (Django tomondan purchase tasdiqlash uchun)
+BOT_PAYMENT_SERVER_PORT = env.int("BOT_PAYMENT_SERVER_PORT", default=8001)
+BOT_PAYMENT_SERVER_SECRET = env.str("BOT_PAYMENT_SERVER_SECRET", default="")
+

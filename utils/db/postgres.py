@@ -206,6 +206,7 @@ class Database:
             "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
             "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ",
             "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMPTZ",
+            "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS click_order_id INTEGER",
         ]
         for query in alter_queries:
             await self.execute(query, execute=True)
@@ -502,6 +503,45 @@ class Database:
             invite_link,
             fetchval=True,
         )
+        return await self.select_purchase_by_id(purchase_id)
+
+    async def create_click_pending_purchase(
+        self, telegram_id: int, course_id: int, click_order_id: int, amount: int
+    ):
+        user = await self.select_user(telegram_id=telegram_id)
+        if not user:
+            return None
+        # Avvalgi pending click xaridini bekor qil
+        await self.execute(
+            "UPDATE purchases SET status='rejected', rejected_at=NOW(), updated_at=NOW() "
+            "WHERE user_id=$1 AND course_id=$2 AND status='pending' AND click_order_id IS NOT NULL",
+            user["id"], course_id, execute=True,
+        )
+        sql = """
+        INSERT INTO purchases (user_id, course_id, amount, status, click_order_id, updated_at)
+        VALUES ($1, $2, $3, 'pending', $4, NOW())
+        RETURNING id;
+        """
+        purchase_id = await self.execute(
+            sql, user["id"], course_id, amount, click_order_id, fetchval=True
+        )
+        if not purchase_id:
+            return None
+        return await self.select_purchase_by_id(purchase_id)
+
+    async def approve_click_purchase(self, click_order_id: int, invite_link: str | None):
+        sql = """
+        UPDATE purchases
+        SET status = 'approved',
+            invite_link = $2,
+            approved_at = NOW(),
+            updated_at = NOW()
+        WHERE click_order_id = $1 AND status = 'pending'
+        RETURNING id;
+        """
+        purchase_id = await self.execute(sql, click_order_id, invite_link, fetchval=True)
+        if not purchase_id:
+            return None
         return await self.select_purchase_by_id(purchase_id)
 
     async def select_active_purchase_for_course(self, user_id: int, course_id: int):
