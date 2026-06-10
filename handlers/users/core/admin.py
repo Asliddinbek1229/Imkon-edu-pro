@@ -770,9 +770,6 @@ async def admin_course_create_cancel(message: types.Message, state: FSMContext):
 @router.message(CourseAdminState.add_name, IsBotAdminFilter(ADMINS))
 async def admin_course_add_name(message: types.Message, state: FSMContext):
     name = (message.text or "").strip()
-    if len(name) < 3 or len(name) > 200:
-        await message.answer("Kurs nomi 3-200 belgi oralig'ida bo'lishi kerak.")
-        return
     await state.update_data(name=name)
     await state.set_state(CourseAdminState.add_is_active)
     await message.answer(
@@ -783,10 +780,8 @@ async def admin_course_add_name(message: types.Message, state: FSMContext):
 
 @router.message(CourseAdminState.add_is_active, IsBotAdminFilter(ADMINS))
 async def admin_course_add_is_active(message: types.Message, state: FSMContext):
-    is_active = parse_visibility(message.text or "")
-    if is_active is None:
-        await message.answer("Holat uchun <code>ha</code> yoki <code>yo'q</code> yozing.")
-        return
+    raw = (message.text or "").strip().lower()
+    is_active = False if raw in ("yo'q", "yoq", "no", "false", "0") else True
     await state.update_data(is_active=is_active)
     await state.set_state(CourseAdminState.add_price)
     await message.answer(
@@ -797,10 +792,7 @@ async def admin_course_add_is_active(message: types.Message, state: FSMContext):
 
 @router.message(CourseAdminState.add_price, IsBotAdminFilter(ADMINS))
 async def admin_course_add_price(message: types.Message, state: FSMContext):
-    price = parse_positive_int(message.text or "")
-    if price is None:
-        await message.answer("Narx faqat raqam bo'lishi kerak. Masalan: <code>250000</code>")
-        return
+    price = parse_positive_int(message.text or "") or 0
     await state.update_data(price=price)
     await state.set_state(CourseAdminState.add_video_count)
     await message.answer(
@@ -811,10 +803,7 @@ async def admin_course_add_price(message: types.Message, state: FSMContext):
 
 @router.message(CourseAdminState.add_video_count, IsBotAdminFilter(ADMINS))
 async def admin_course_add_video_count(message: types.Message, state: FSMContext):
-    video_count = parse_positive_int(message.text or "")
-    if video_count is None:
-        await message.answer("Video soni faqat raqam bo'lishi kerak. Masalan: <code>12</code>")
-        return
+    video_count = parse_positive_int(message.text or "") or 0
     await state.update_data(video_count=video_count)
     await state.set_state(CourseAdminState.add_author)
     await message.answer(
@@ -826,10 +815,7 @@ async def admin_course_add_video_count(message: types.Message, state: FSMContext
 
 @router.message(CourseAdminState.add_author, IsBotAdminFilter(ADMINS))
 async def admin_course_add_author(message: types.Message, state: FSMContext):
-    author = optional_course_text(message.text or "", DEFAULT_COURSE_AUTHOR)
-    if not author or len(author) > 200:
-        await message.answer("Muallif 1-200 belgi oralig'ida bo'lishi kerak.")
-        return
+    author = optional_course_text(message.text or "", DEFAULT_COURSE_AUTHOR) or DEFAULT_COURSE_AUTHOR
     await state.update_data(author=author)
     await state.set_state(CourseAdminState.add_duration)
     await message.answer(
@@ -841,9 +827,6 @@ async def admin_course_add_author(message: types.Message, state: FSMContext):
 @router.message(CourseAdminState.add_duration, IsBotAdminFilter(ADMINS))
 async def admin_course_add_duration(message: types.Message, state: FSMContext):
     duration = optional_course_text(message.text or "")
-    if duration and len(duration) > 100:
-        await message.answer("Davomiylik 100 belgidan oshmasin.")
-        return
     await state.update_data(duration=duration)
     await state.set_state(CourseAdminState.add_target_exam)
     await message.answer(
@@ -856,9 +839,6 @@ async def admin_course_add_duration(message: types.Message, state: FSMContext):
 @router.message(CourseAdminState.add_target_exam, IsBotAdminFilter(ADMINS))
 async def admin_course_add_target_exam(message: types.Message, state: FSMContext):
     target_exam = optional_course_text(message.text or "", DEFAULT_TARGET_EXAM)
-    if target_exam and len(target_exam) > 200:
-        await message.answer("Imtihon matni 200 belgidan oshmasin.")
-        return
     await state.update_data(target_exam=target_exam)
     await state.set_state(CourseAdminState.add_includes)
     await message.answer(
@@ -881,10 +861,7 @@ async def admin_course_add_includes(message: types.Message, state: FSMContext):
 
 @router.message(CourseAdminState.add_access_type, IsBotAdminFilter(ADMINS))
 async def admin_course_add_access_type(message: types.Message, state: FSMContext):
-    access_type = optional_course_text(message.text or "", DEFAULT_ACCESS_TYPE)
-    if not access_type or len(access_type) > 100:
-        await message.answer("Kirish turi 1-100 belgi oralig'ida bo'lishi kerak.")
-        return
+    access_type = optional_course_text(message.text or "", DEFAULT_ACCESS_TYPE) or DEFAULT_ACCESS_TYPE
     await state.update_data(access_type=access_type)
     await state.set_state(CourseAdminState.add_link)
     await message.answer(
@@ -896,9 +873,6 @@ async def admin_course_add_access_type(message: types.Message, state: FSMContext
 @router.message(CourseAdminState.add_link, IsBotAdminFilter(ADMINS))
 async def admin_course_add_link(message: types.Message, state: FSMContext):
     telegram_link = optional_course_text(message.text or "")
-    if telegram_link and len(telegram_link) > 500:
-        await message.answer("Guruh link 500 belgidan oshmasin.")
-        return
     await state.update_data(telegram_link=telegram_link)
     await state.set_state(CourseAdminState.add_sort_order)
     await message.answer(
@@ -910,11 +884,8 @@ async def admin_course_add_link(message: types.Message, state: FSMContext):
 @router.message(CourseAdminState.add_sort_order, IsBotAdminFilter(ADMINS))
 async def admin_course_add_sort_order(message: types.Message, state: FSMContext):
     raw_sort_order = (message.text or "").strip()
-    sort_order = DEFAULT_SORT_ORDER if raw_sort_order.lower() in SKIP_TEXTS else parse_positive_int(raw_sort_order)
-    if sort_order is None:
-        await message.answer("Sort faqat raqam bo'lishi kerak. Masalan: <code>100</code>")
-        return
-    await state.update_data(sort_order=sort_order)
+    sort_order = parse_positive_int(raw_sort_order) if raw_sort_order.lower() not in SKIP_TEXTS else None
+    await state.update_data(sort_order=sort_order or DEFAULT_SORT_ORDER)
     await state.set_state(CourseAdminState.add_description)
     await message.answer(
         "12/13. 📝 Kurs tavsifini yuboring.",
@@ -925,9 +896,6 @@ async def admin_course_add_sort_order(message: types.Message, state: FSMContext)
 @router.message(CourseAdminState.add_description, IsBotAdminFilter(ADMINS))
 async def admin_course_add_description(message: types.Message, state: FSMContext):
     description = (message.text or "").strip()
-    if len(description) < 10:
-        await message.answer("Tavsif kamida 10 belgi bo'lishi kerak.")
-        return
     await state.update_data(description=description)
     await state.set_state(CourseAdminState.add_photo)
     await message.answer(
@@ -966,6 +934,10 @@ async def admin_course_add_photo(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(
         f"✅ Kurs yaratildi: <b>{html.quote(course['name'])}</b>",
+        reply_markup=main_menu_keyboard(user_id=message.from_user.id),
+    )
+    await message.answer(
+        "Kursni boshqarish:",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [
