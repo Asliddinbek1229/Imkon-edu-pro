@@ -269,9 +269,6 @@ async def edit_profile_value(message: types.Message, state: FSMContext):
 
     if field in {"first_name", "last_name"}:
         value = normalize_name(raw_value)
-        if not is_valid_name(value):
-            await message.answer("❗ Qiymat noto'g'ri. Faqat harflardan iborat 2-50 belgili matn kiriting.")
-            return
     elif field == "phone":
         value = normalize_phone(raw_value)
         if not value:

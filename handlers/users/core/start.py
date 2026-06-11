@@ -216,10 +216,6 @@ async def cancel_registration(message: types.Message, state: FSMContext):
 @router.message(RegistrationState.first_name, F.text)
 async def registration_first_name(message: types.Message, state: FSMContext):
     first_name = normalize_name(message.text)
-    if not is_valid_name(first_name):
-        await message.answer("❗ Ism noto'g'ri. Faqat harflardan iborat 2-50 belgili ism kiriting.")
-        return
-
     await state.update_data(first_name=first_name)
     await state.set_state(RegistrationState.last_name)
     await message.answer(
@@ -232,10 +228,6 @@ async def registration_first_name(message: types.Message, state: FSMContext):
 @router.message(RegistrationState.last_name, F.text)
 async def registration_last_name(message: types.Message, state: FSMContext):
     last_name = normalize_name(message.text)
-    if not is_valid_name(last_name):
-        await message.answer("❗ Familiya noto'g'ri. Faqat harflardan iborat 2-50 belgili familiya kiriting.")
-        return
-
     await state.update_data(last_name=last_name)
     await state.set_state(RegistrationState.phone)
     await message.answer(
