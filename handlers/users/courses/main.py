@@ -29,7 +29,7 @@ class CatalogDetailCallback(CallbackData, prefix="cat_detail"):
 
 
 class CatalogActionCallback(CallbackData, prefix="cat_action"):
-    action: str
+    action: str  # menu | cancel | buy | free_join
     page: int = 1
     course_id: int = 0
 
@@ -66,9 +66,10 @@ def course_catalog_text(courses: list, page: int, total: int) -> str:
     for index, course in enumerate(courses, start=1):
         status = "🎁" if course["price"] <= 0 else "💎"
         video = f"{course['video_count']} video" if course["video_count"] else "video darslar"
+        price_str = format_price(course["price"]) if course["show_price"] else "—"
         lines.append(
             f"{index}. {status} <b>{html.quote(course['name'])}</b>\n"
-            f"   {video} · {format_price(course['price'])}"
+            f"   {video} · {price_str}"
         )
 
     lines.extend(
@@ -138,6 +139,7 @@ def course_detail_text(course) -> str:
     target_exam = course["target_exam"] or "DTM, Milliy Sertifikat, Attestatsiya"
     duration = course["duration"] or "Admin tomonidan belgilanadi"
     price_badge = "🎁 <b>BEPUL KURS</b>" if course["price"] <= 0 else "💎 <b>PREMIUM KURS</b>"
+    price_line = f"💰 Narx: <b>{format_price(course['price'])}</b>\n" if course["show_price"] else ""
 
     return (
         "✨ <b>IMKON-EDU PRO</b>\n"
@@ -146,7 +148,7 @@ def course_detail_text(course) -> str:
         f"👨‍🏫 <b>Muallif:</b> {html.quote(course['author'])}\n\n"
         "━━━━━━━━━━━━━━\n"
         "📌 <b>Kurs paketi</b>\n"
-        f"💰 Narx: <b>{format_price(course['price'])}</b>\n"
+        f"{price_line}"
         f"🎬 Video: <b>{course['video_count']} ta dars</b>\n"
         f"⏱ Davomiylik: <b>{html.quote(duration)}</b>\n"
         f"♾ Kirish: <b>{html.quote(course['access_type'])}</b>\n\n"
@@ -162,16 +164,47 @@ def course_detail_text(course) -> str:
 
 def course_detail_keyboard(course, page: int) -> InlineKeyboardMarkup:
     course_id = course["id"]
-    buy_text = "🎁 Bepul olish" if course["price"] <= 0 else f"💎 {format_price(course['price'])} | Sotib olish"
+    show_free = course["show_free_button"] and bool(course["free_telegram_link"])
+    show_paid = course["show_paid_button"] and course["price"] > 0
+
+    action_rows: list[list[InlineKeyboardButton]] = []
+
+    if show_free:
+        action_rows.append([
+            InlineKeyboardButton(
+                text="🎁 Bepul kirish",
+                callback_data=CatalogActionCallback(action="free_join", course_id=course_id, page=page).pack(),
+                style=ButtonStyle.SUCCESS,
+            )
+        ])
+
+    if show_paid:
+        paid_btn_text = (
+            f"💎 {format_price(course['price'])} | Sotib olish"
+            if course["show_price"]
+            else "💎 Sotib olish"
+        )
+        action_rows.append([
+            InlineKeyboardButton(
+                text=paid_btn_text,
+                callback_data=CatalogActionCallback(action="buy", course_id=course_id, page=page).pack(),
+                style=ButtonStyle.SUCCESS,
+            )
+        ])
+
+    if not show_free and not show_paid and course["price"] <= 0:
+        # Narxi 0, show_free_button o'chirilgan — eski bepul olish xatti-harakati
+        action_rows.append([
+            InlineKeyboardButton(
+                text="🎁 Bepul olish",
+                callback_data=CatalogActionCallback(action="buy", course_id=course_id, page=page).pack(),
+                style=ButtonStyle.SUCCESS,
+            )
+        ])
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=buy_text,
-                    callback_data=CatalogActionCallback(action="buy", course_id=course_id, page=page).pack(),
-                    style=ButtonStyle.SUCCESS,
-                )
-            ],
+            *action_rows,
             [
                 InlineKeyboardButton(
                     text="📋 Kurs nomini nusxalash",
@@ -282,6 +315,54 @@ async def catalog_back_to_menu(call: types.CallbackQuery):
 async def catalog_cancel(call: types.CallbackQuery):
     await call.answer("Bekor qilindi.")
     await call.message.delete()
+
+
+@router.callback_query(CatalogActionCallback.filter(F.action == "free_join"))
+async def catalog_free_join(call: types.CallbackQuery, callback_data: CatalogActionCallback):
+    course = await db.select_course(callback_data.course_id)
+    if not course or not course["is_active"]:
+        await call.answer("Kurs topilmadi yoki vaqtincha yopilgan.", show_alert=True)
+        return
+    if not course["show_free_button"] or not course["free_telegram_link"]:
+        await call.answer("Bepul kirish hozir mavjud emas.", show_alert=True)
+        return
+
+    purchase = await db.create_free_purchase(call.from_user.id, course["id"])
+    if not purchase:
+        await call.answer("Avval ro'yxatdan o'ting: /start", show_alert=True)
+        return
+
+    access_link = purchase["invite_link"] or course["free_telegram_link"]
+    text = (
+        "🎁 <b>Bepul kirish tasdiqlandi!</b>\n\n"
+        f"📘 Kurs: <b>{html.quote(course['name'])}</b>\n\n"
+        f"🔗 Bepul kanalga kirish: {html.quote(access_link)}\n\n"
+        "Yuqoridagi link orqali yoki quyidagi tugma orqali kanalga kiring."
+    )
+    markup = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔗 Bepul kanalga kirish",
+                    url=access_link,
+                    style=ButtonStyle.SUCCESS,
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📚 Katalogga qaytish",
+                    callback_data=CatalogPageCallback(page=callback_data.page).pack(),
+                    style=ButtonStyle.PRIMARY,
+                )
+            ],
+        ]
+    )
+    await call.answer("Bepul kirish linki yuborildi.")
+    if call.message.photo:
+        await call.message.delete()
+        await call.message.answer(text, reply_markup=markup)
+        return
+    await call.message.edit_text(text, reply_markup=markup)
 
 
 @router.callback_query(CatalogActionCallback.filter(F.action == "buy"))

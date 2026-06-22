@@ -48,7 +48,9 @@ def format_date(value) -> str:
     return str(value)
 
 
-def status_label(status: str) -> str:
+def status_label(status: str, purchase_type: str = "paid") -> str:
+    if status == "approved" and purchase_type == "free":
+        return "🎁 Bepul kirish"
     labels = {
         "pending": "⏳ Tekshirilmoqda",
         "approved": "✅ Faol",
@@ -74,7 +76,7 @@ def purchases_text(purchases: list, page: int, total: int) -> str:
     for index, purchase in enumerate(purchases, start=1):
         lines.append(
             f"{index}. <b>{html.quote(purchase['course_name'])}</b>\n"
-            f"   {status_label(purchase['status'])} | {format_price(purchase['amount'])}\n"
+            f"   {status_label(purchase['status'], purchase.get('purchase_type', 'paid'))} | {format_price(purchase['amount'])}\n"
             f"   Sana: {format_date(purchase['created_at'])}"
         )
 
@@ -137,8 +139,13 @@ def purchases_keyboard(purchases: list, page: int, total: int) -> InlineKeyboard
 
 
 def purchase_detail_text(purchase) -> str:
-    access_link = purchase["invite_link"] or purchase["course_telegram_link"] or "-"
+    purchase_type = purchase.get("purchase_type", "paid")
+    is_free_type = purchase_type == "free"
+    access_link = purchase["invite_link"] or (
+        purchase["course_free_telegram_link"] if is_free_type else purchase["course_telegram_link"]
+    ) or "-"
     admin_note = purchase["admin_note"] or "-"
+    type_label = "🎁 Bepul kirish" if is_free_type else "💎 To'lov orqali"
     approved_line = ""
     if purchase["status"] == "approved":
         approved_line = (
@@ -161,13 +168,14 @@ def purchase_detail_text(purchase) -> str:
 
     return (
         f"📘 <b>{html.quote(purchase['course_name'])}</b>\n\n"
-        f"Holat: <b>{status_label(purchase['status'])}</b>\n"
+        f"Tur: <b>{type_label}</b>\n"
+        f"Holat: <b>{status_label(purchase['status'], purchase_type)}</b>\n"
         f"Summa: <b>{format_price(purchase['amount'])}</b>\n"
         f"Video: <b>{purchase['course_video_count']} ta</b>\n"
         f"Kirish: <b>{html.quote(purchase['course_access_type'])}</b>\n"
-        f"Sotib olish sanasi: {format_date(purchase['created_at'])}\n"
-        f"Tasdiqlangan sana: {format_date(purchase['approved_at'])}\n"
-        f"Rad etilgan sana: {format_date(purchase['rejected_at'])}\n"
+        f"Sana: {format_date(purchase['created_at'])}\n"
+        f"Tasdiqlangan: {format_date(purchase['approved_at'])}\n"
+        f"Rad etilgan: {format_date(purchase['rejected_at'])}\n"
         f"Admin izohi: {html.quote(admin_note)}\n"
         f"Kurs linki: {html.quote(access_link)}"
         f"{approved_line}"
@@ -176,7 +184,11 @@ def purchase_detail_text(purchase) -> str:
 
 def purchase_detail_keyboard(purchase, page: int) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    access_link = purchase["invite_link"] or purchase["course_telegram_link"]
+    purchase_type = purchase.get("purchase_type", "paid")
+    is_free_type = purchase_type == "free"
+    access_link = purchase["invite_link"] or (
+        purchase.get("course_free_telegram_link") if is_free_type else purchase["course_telegram_link"]
+    )
 
     if purchase["status"] == "approved" and access_link:
         rows.append(
@@ -189,7 +201,7 @@ def purchase_detail_keyboard(purchase, page: int) -> InlineKeyboardMarkup:
             ]
         )
 
-    if purchase["status"] == "pending" and not purchase.get("click_order_id"):
+    if purchase["status"] == "pending" and not purchase.get("click_order_id") and not is_free_type:
         receipt_text = "📸 Chekni qayta yuborish" if purchase["receipt_file_id"] else "📸 Chek yuborish"
         rows.append(
             [

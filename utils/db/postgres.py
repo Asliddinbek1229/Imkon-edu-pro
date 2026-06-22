@@ -161,6 +161,10 @@ class Database:
             "ALTER TABLE courses ADD COLUMN IF NOT EXISTS includes TEXT",
             "ALTER TABLE courses ADD COLUMN IF NOT EXISTS access_type VARCHAR(100) NOT NULL DEFAULT 'Hayotbod'",
             "ALTER TABLE courses ADD COLUMN IF NOT EXISTS telegram_link VARCHAR(500)",
+            "ALTER TABLE courses ADD COLUMN IF NOT EXISTS free_telegram_link VARCHAR(500)",
+            "ALTER TABLE courses ADD COLUMN IF NOT EXISTS show_free_button BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE courses ADD COLUMN IF NOT EXISTS show_paid_button BOOLEAN NOT NULL DEFAULT TRUE",
+            "ALTER TABLE courses ADD COLUMN IF NOT EXISTS show_price BOOLEAN NOT NULL DEFAULT TRUE",
             "ALTER TABLE courses ADD COLUMN IF NOT EXISTS thumbnail VARCHAR(500)",
             "ALTER TABLE courses ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE",
             "ALTER TABLE courses ADD COLUMN IF NOT EXISTS is_bundle BOOLEAN NOT NULL DEFAULT FALSE",
@@ -197,6 +201,7 @@ class Database:
         alter_queries = [
             "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS amount INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'pending'",
+            "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS purchase_type VARCHAR(10) NOT NULL DEFAULT 'paid'",
             "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS receipt_file_id VARCHAR(500)",
             "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS card_number_used VARCHAR(30)",
             "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS admin_note TEXT",
@@ -400,6 +405,9 @@ class Database:
         video_count: int,
         thumbnail: str | None = None,
         telegram_link: str | None = None,
+        free_telegram_link: str | None = None,
+        show_free_button: bool = False,
+        show_paid_button: bool = True,
         author: str = "Maqsudxon Mo'minxonov",
         duration: str | None = None,
         target_exam: str | None = "DTM, Milliy Sertifikat, Attestatsiya",
@@ -411,9 +419,10 @@ class Database:
         sql = """
         INSERT INTO courses (
             name, description, price, video_count, thumbnail, telegram_link,
+            free_telegram_link, show_free_button, show_paid_button,
             author, duration, target_exam, includes, access_type, sort_order, is_active, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
         RETURNING *;
         """
         return await self.execute(
@@ -424,6 +433,9 @@ class Database:
             video_count,
             thumbnail,
             telegram_link,
+            free_telegram_link,
+            show_free_button,
+            show_paid_button,
             author,
             duration,
             target_exam,
@@ -442,6 +454,10 @@ class Database:
             "video_count",
             "thumbnail",
             "telegram_link",
+            "free_telegram_link",
+            "show_free_button",
+            "show_paid_button",
+            "show_price",
             "author",
             "duration",
             "target_exam",
@@ -489,9 +505,9 @@ class Database:
         invite_link = course["telegram_link"] if status == "approved" else None
         sql = f"""
         INSERT INTO purchases (
-            user_id, course_id, amount, status, invite_link, approved_at, updated_at
+            user_id, course_id, amount, status, purchase_type, invite_link, approved_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, {approved_at_sql}, NOW())
+        VALUES ($1, $2, $3, $4, 'paid', $5, {approved_at_sql}, NOW())
         RETURNING id;
         """
         purchase_id = await self.execute(
@@ -518,8 +534,8 @@ class Database:
             user["id"], course_id, execute=True,
         )
         sql = """
-        INSERT INTO purchases (user_id, course_id, amount, status, click_order_id, updated_at)
-        VALUES ($1, $2, $3, 'pending', $4, NOW())
+        INSERT INTO purchases (user_id, course_id, amount, status, purchase_type, click_order_id, updated_at)
+        VALUES ($1, $2, $3, 'pending', 'paid', $4, NOW())
         RETURNING id;
         """
         purchase_id = await self.execute(
@@ -556,13 +572,38 @@ class Database:
         """
         return await self.execute(sql, telegram_id, fetch=True)
 
-    async def select_active_purchase_for_course(self, user_id: int, course_id: int):
+    async def select_active_purchase_for_course(
+        self, user_id: int, course_id: int, purchase_type: str | None = None
+    ):
+        if purchase_type is not None:
+            sql = """
+            SELECT
+                p.*,
+                c.name AS course_name,
+                c.description AS course_description,
+                c.telegram_link AS course_telegram_link,
+                c.free_telegram_link AS course_free_telegram_link,
+                c.thumbnail AS course_thumbnail,
+                c.video_count AS course_video_count,
+                c.access_type AS course_access_type
+            FROM purchases p
+            JOIN courses c ON c.id = p.course_id
+            WHERE p.user_id = $1
+              AND p.course_id = $2
+              AND p.purchase_type = $3
+              AND p.status IN ('pending', 'approved')
+            ORDER BY p.id DESC
+            LIMIT 1;
+            """
+            return await self.execute(sql, user_id, course_id, purchase_type, fetchrow=True)
+
         sql = """
         SELECT
             p.*,
             c.name AS course_name,
             c.description AS course_description,
             c.telegram_link AS course_telegram_link,
+            c.free_telegram_link AS course_free_telegram_link,
             c.thumbnail AS course_thumbnail,
             c.video_count AS course_video_count,
             c.access_type AS course_access_type
@@ -576,6 +617,31 @@ class Database:
         """
         return await self.execute(sql, user_id, course_id, fetchrow=True)
 
+    async def create_free_purchase(self, telegram_id: int, course_id: int):
+        user = await self.select_user(telegram_id=telegram_id)
+        course = await self.select_course(course_id)
+        if not user or not course:
+            return None
+
+        existing = await self.select_active_purchase_for_course(
+            user["id"], course_id, purchase_type="free"
+        )
+        if existing:
+            return existing
+
+        invite_link = course["free_telegram_link"]
+        sql = """
+        INSERT INTO purchases (
+            user_id, course_id, amount, status, purchase_type, invite_link, approved_at, updated_at
+        )
+        VALUES ($1, $2, 0, 'approved', 'free', $3, NOW(), NOW())
+        RETURNING id;
+        """
+        purchase_id = await self.execute(
+            sql, user["id"], course["id"], invite_link, fetchval=True
+        )
+        return await self.select_purchase_by_id(purchase_id)
+
     async def select_purchase_by_id(self, purchase_id: int):
         sql = """
         SELECT
@@ -583,6 +649,7 @@ class Database:
             c.name AS course_name,
             c.description AS course_description,
             c.telegram_link AS course_telegram_link,
+            c.free_telegram_link AS course_free_telegram_link,
             c.thumbnail AS course_thumbnail,
             c.video_count AS course_video_count,
             c.access_type AS course_access_type,
@@ -691,6 +758,7 @@ class Database:
             p.*,
             c.name AS course_name,
             c.telegram_link AS course_telegram_link,
+            c.free_telegram_link AS course_free_telegram_link,
             c.thumbnail AS course_thumbnail,
             c.video_count AS course_video_count,
             c.access_type AS course_access_type
@@ -710,6 +778,7 @@ class Database:
             c.name AS course_name,
             c.description AS course_description,
             c.telegram_link AS course_telegram_link,
+            c.free_telegram_link AS course_free_telegram_link,
             c.thumbnail AS course_thumbnail,
             c.video_count AS course_video_count,
             c.access_type AS course_access_type,

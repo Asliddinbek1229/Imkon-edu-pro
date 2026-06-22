@@ -434,17 +434,23 @@ def admin_courses_keyboard(courses: list, page: int, total: int) -> InlineKeyboa
 
 def admin_course_detail_text(course) -> str:
     status = "✅ Userlarga ko'rinadi" if course["is_active"] else "🚫 Userlarga ko'rinmaydi"
+    free_btn = "✅ Yoqilgan" if course["show_free_button"] else "🚫 O'chirilgan"
+    paid_btn = "✅ Yoqilgan" if course["show_paid_button"] else "🚫 O'chirilgan"
+    price_visible = "✅ Ko'rinadi" if course["show_price"] else "🚫 Yashirilgan"
     return (
         f"📘 <b>{html.quote(course['name'])}</b>\n"
         f"Holat: <b>{status}</b>\n"
-        f"Narx: <b>{format_price(course['price'])}</b>\n"
+        f"Narx: <b>{format_price(course['price'])}</b> ({price_visible})\n"
         f"Video: <b>{course['video_count']} ta</b>\n"
         f"Muallif: {html.quote(course['author'])}\n"
         f"Davomiylik: {html.quote(course['duration'] or '-')}\n"
         f"Imtihon: {html.quote(course['target_exam'] or '-')}\n"
         f"Qo'shimcha: {html.quote(course['includes'] or '-')}\n"
         f"Kirish: {html.quote(course['access_type'])}\n"
-        f"Guruh link: {html.quote(course['telegram_link'] or '-')}\n"
+        f"Pullik kanal link: {html.quote(course['telegram_link'] or '-')}\n"
+        f"Bepul kanal link: {html.quote(course['free_telegram_link'] or '-')}\n"
+        f"Bepul tugma: {free_btn}\n"
+        f"Pullik tugma: {paid_btn}\n"
         f"Sort: {course['sort_order']}\n\n"
         "<b>Tavsif:</b>\n"
         f"{html.quote(course['description'])}"
@@ -473,6 +479,11 @@ def admin_course_detail_keyboard(course) -> InlineKeyboardMarkup:
                     text="💰 Narx",
                     callback_data=AdminCourseEditCallback(field="price", course_id=course["id"]).pack(),
                     style=ButtonStyle.PRIMARY,
+                ),
+                InlineKeyboardButton(
+                    text="👁 Narx: " + ("✅" if course["show_price"] else "🚫"),
+                    callback_data=AdminCourseActionCallback(action="toggle_show_price", course_id=course["id"]).pack(),
+                    style=ButtonStyle.SUCCESS if course["show_price"] else ButtonStyle.DANGER,
                 ),
                 InlineKeyboardButton(
                     text="📊 Video",
@@ -511,9 +522,26 @@ def admin_course_detail_keyboard(course) -> InlineKeyboardMarkup:
                     style=ButtonStyle.PRIMARY,
                 ),
                 InlineKeyboardButton(
-                    text="🔗 Link",
+                    text="🔗 Pullik link",
                     callback_data=AdminCourseEditCallback(field="telegram_link", course_id=course["id"]).pack(),
                     style=ButtonStyle.PRIMARY,
+                ),
+                InlineKeyboardButton(
+                    text="🆓 Bepul link",
+                    callback_data=AdminCourseEditCallback(field="free_telegram_link", course_id=course["id"]).pack(),
+                    style=ButtonStyle.PRIMARY,
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🎁 Bepul tugma: " + ("✅" if course["show_free_button"] else "🚫"),
+                    callback_data=AdminCourseActionCallback(action="toggle_free_btn", course_id=course["id"]).pack(),
+                    style=ButtonStyle.SUCCESS if course["show_free_button"] else ButtonStyle.DANGER,
+                ),
+                InlineKeyboardButton(
+                    text="💎 Pullik tugma: " + ("✅" if course["show_paid_button"] else "🚫"),
+                    callback_data=AdminCourseActionCallback(action="toggle_paid_btn", course_id=course["id"]).pack(),
+                    style=ButtonStyle.SUCCESS if course["show_paid_button"] else ButtonStyle.DANGER,
                 ),
             ],
             [
@@ -969,6 +997,38 @@ async def admin_course_toggle(call: types.CallbackQuery, callback_data: AdminCou
     await render_admin_course_detail(call, course_id=course["id"])
 
 
+@router.callback_query(AdminCourseActionCallback.filter(F.action == "toggle_show_price"), IsBotAdminFilter(ADMINS))
+async def admin_course_toggle_show_price(call: types.CallbackQuery, callback_data: AdminCourseActionCallback):
+    course = await db.select_course(callback_data.course_id)
+    if not course:
+        await call.answer("Kurs topilmadi.", show_alert=True)
+        return
+    await db.update_course_field(course_id=course["id"], field_name="show_price", value=not course["show_price"])
+    await render_admin_course_detail(call, course_id=course["id"])
+
+
+@router.callback_query(AdminCourseActionCallback.filter(F.action == "toggle_free_btn"), IsBotAdminFilter(ADMINS))
+async def admin_course_toggle_free_btn(call: types.CallbackQuery, callback_data: AdminCourseActionCallback):
+    course = await db.select_course(callback_data.course_id)
+    if not course:
+        await call.answer("Kurs topilmadi.", show_alert=True)
+        return
+    new_val = not course["show_free_button"]
+    await db.update_course_field(course_id=course["id"], field_name="show_free_button", value=new_val)
+    await render_admin_course_detail(call, course_id=course["id"])
+
+
+@router.callback_query(AdminCourseActionCallback.filter(F.action == "toggle_paid_btn"), IsBotAdminFilter(ADMINS))
+async def admin_course_toggle_paid_btn(call: types.CallbackQuery, callback_data: AdminCourseActionCallback):
+    course = await db.select_course(callback_data.course_id)
+    if not course:
+        await call.answer("Kurs topilmadi.", show_alert=True)
+        return
+    new_val = not course["show_paid_button"]
+    await db.update_course_field(course_id=course["id"], field_name="show_paid_button", value=new_val)
+    await render_admin_course_detail(call, course_id=course["id"])
+
+
 @router.callback_query(AdminCourseActionCallback.filter(F.action == "delete_ask"), IsBotAdminFilter(ADMINS))
 async def admin_course_delete_ask(call: types.CallbackQuery, callback_data: AdminCourseActionCallback):
     course = await db.select_course(callback_data.course_id)
@@ -1034,7 +1094,8 @@ async def admin_course_edit_start(
         "sort_order": "yangi sort tartibini",
         "description": "yangi tavsifni",
         "thumbnail": "yangi rasmni",
-        "telegram_link": "yangi guruh/linkni",
+        "telegram_link": "yangi pullik guruh/linkni",
+        "free_telegram_link": "yangi bepul kanal linkini",
     }
     await call.answer()
     await state.clear()
@@ -1044,7 +1105,7 @@ async def admin_course_edit_start(
     if callback_data.field == "thumbnail":
         await call.message.answer("🖼 Yangi rasm yuboring. Rasmni o'chirish uchun <code>remove</code> yozing.")
         return
-    if callback_data.field in {"duration", "target_exam", "includes", "telegram_link"}:
+    if callback_data.field in {"duration", "target_exam", "includes", "telegram_link", "free_telegram_link"}:
         await call.message.answer(
             f"✏️ {field_titles.get(callback_data.field, 'yangi qiymatni')} kiriting.\n"
             "Maydonni tozalash uchun <code>remove</code> yozing."
@@ -1077,7 +1138,7 @@ async def admin_course_edit_value(message: types.Message, state: FSMContext):
         if value is None:
             await message.answer("Bu maydon faqat raqam qabul qiladi.")
             return
-    elif field in {"duration", "target_exam", "includes", "telegram_link"}:
+    elif field in {"duration", "target_exam", "includes", "telegram_link", "free_telegram_link"}:
         value = nullable_course_text(message.text or "")
         if value and field == "duration" and len(value) > 100:
             await message.answer("Davomiylik 100 belgidan oshmasin.")
@@ -1085,8 +1146,8 @@ async def admin_course_edit_value(message: types.Message, state: FSMContext):
         if value and field == "target_exam" and len(value) > 200:
             await message.answer("Imtihon matni 200 belgidan oshmasin.")
             return
-        if value and field == "telegram_link" and len(value) > 500:
-            await message.answer("Guruh link 500 belgidan oshmasin.")
+        if value and field in {"telegram_link", "free_telegram_link"} and len(value) > 500:
+            await message.answer("Link 500 belgidan oshmasin.")
             return
     else:
         value = (message.text or "").strip()
