@@ -58,19 +58,14 @@ def course_catalog_text(courses: list, page: int, total: int) -> str:
     total_pages = max(ceil(total / COURSES_PER_PAGE), 1)
     lines = [
         "💎 <b>IMKON-EDU PRO KURSLAR</b>",
-        "Biologiya bo'yicha saralangan video kurslar",
+        "Saralangan video kurslar",
         "",
         f"📄 Sahifa: <b>{page}/{total_pages}</b>",
         "",
     ]
     for index, course in enumerate(courses, start=1):
         status = "🎁" if course["price"] <= 0 else "💎"
-        video = f"{course['video_count']} video" if course["video_count"] else "video darslar"
-        price_str = format_price(course["price"]) if course["show_price"] else "—"
-        lines.append(
-            f"{index}. {status} <b>{html.quote(course['name'])}</b>\n"
-            f"   {video} · {price_str}"
-        )
+        lines.append(f"{index}. {status} <b>{html.quote(course['name'])}</b>")
 
     lines.extend(
         [
