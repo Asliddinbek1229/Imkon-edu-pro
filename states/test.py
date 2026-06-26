@@ -34,6 +34,7 @@ class CourseAdminState(StatesGroup):
     add_sort_order = State()
     add_description = State()
     add_photo = State()
+    add_video = State()
     edit_value = State()
 
 
@@ -44,3 +45,28 @@ class AdminSettingsState(StatesGroup):
 class AdminState(StatesGroup):
     are_you_sure = State()
     ask_ad_content = State()
+
+
+class SupportState(StatesGroup):
+    waiting_message = State()
+
+
+class AdminBroadcastState(StatesGroup):
+    collect_text = State()
+    collect_photo = State()
+    collect_video = State()
+    collect_video_after_photo = State()
+    collect_caption = State()
+    collect_group = State()
+
+
+class CouponState(StatesGroup):
+    enter_code = State()
+
+
+class AdminCouponState(StatesGroup):
+    enter_code = State()
+    enter_name = State()
+    enter_discount_value = State()
+    enter_max_uses = State()
+    enter_expires = State()

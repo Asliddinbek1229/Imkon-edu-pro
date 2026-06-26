@@ -9,32 +9,25 @@ def setup_handlers(dispatcher: Dispatcher) -> None:
     """HANDLERS"""
     from handlers.users.core import setup_core_routers
     from handlers.users.payment import setup_payment_routers
+    from handlers.groups import setup_groups_routers
 
     dispatcher.include_router(setup_core_routers())
     dispatcher.include_router(setup_payment_routers())
+    dispatcher.include_router(setup_groups_routers())
 
 
 def setup_middlewares(dispatcher: Dispatcher, bot: Bot) -> None:
     """MIDDLEWARE"""
     from middlewares.throttling import ThrottlingMiddleware
 
-    # Spamdan himoya qilish uchun o‘rta dastur
+    # Spamdan himoya qilish uchun o’rta dastur
     dispatcher.message.middleware(ThrottlingMiddleware(slow_mode_delay=0.5))
-
-
-def setup_filters(dispatcher: Dispatcher) -> None:
-    """FILTERS"""
-    from filters import ChatPrivateFilter
-
-    # Faqatgina private chatlarda ishlaydigan filter
-    dispatcher.message.filter(ChatPrivateFilter(chat_type=["private"]))
 
 
 async def setup_aiogram(dispatcher: Dispatcher, bot: Bot) -> None:
     logger.info("Configuring aiogram")
     setup_handlers(dispatcher=dispatcher)
     setup_middlewares(dispatcher=dispatcher, bot=bot)
-    setup_filters(dispatcher=dispatcher)
     logger.info("Configured aiogram")
 
 
@@ -65,6 +58,9 @@ async def aiogram_on_startup_polling(dispatcher: Dispatcher, bot: Bot) -> None:
     await database_connected()
 
     asyncio.create_task(start_payment_server())
+
+    from utils.scheduler import start_notification_scheduler
+    asyncio.create_task(start_notification_scheduler(bot, db))
 
     logger.info("Starting polling")
     await bot.delete_webhook(drop_pending_updates=True)

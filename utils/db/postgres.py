@@ -51,10 +51,14 @@ class Database:
         await self.ensure_users_columns()
         await self.create_table_courses()
         await self.ensure_courses_columns()
+        await self.create_table_coupons()          # purchases FK uchun avval yaratilishi kerak
         await self.create_table_purchases()
         await self.ensure_purchases_columns()
         await self.create_table_user_access()
         await self.create_table_settings()
+        await self.create_table_support_messages()
+        await self.create_table_installment_plans()
+        await self.create_table_installment_payments()
 
     async def create_table_users(self):
         # Users jadvali
@@ -105,6 +109,21 @@ class Database:
         sql = "SELECT * FROM settings WHERE key = $1"
         return await self.execute(sql, key, fetchrow=True)
 
+    async def get_support_group_id(self) -> int:
+        row = await self.get_setting("support_group_id")
+        if row and row["text"]:
+            try:
+                return int(row["text"].strip())
+            except (ValueError, TypeError):
+                return 0
+        return 0
+
+    async def get_admin_username(self) -> str:
+        row = await self.get_setting("admin_username")
+        if row and row["text"]:
+            return row["text"].strip().lstrip("@")
+        return "biolog_mm02"
+
     async def upsert_setting(self, key: str, text: str | None, photo_file_id: str | None):
         sql = """
         INSERT INTO settings (key, text, photo_file_id, updated_at)
@@ -116,6 +135,29 @@ class Database:
         RETURNING *;
         """
         return await self.execute(sql, key, text, photo_file_id, fetchrow=True)
+
+    async def create_table_support_messages(self):
+        sql = """
+        CREATE TABLE IF NOT EXISTS support_messages (
+            id SERIAL PRIMARY KEY,
+            group_message_id INTEGER NOT NULL UNIQUE,
+            user_telegram_id BIGINT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """
+        await self.execute(sql, execute=True)
+
+    async def save_support_message(self, group_message_id: int, user_telegram_id: int):
+        sql = """
+        INSERT INTO support_messages (group_message_id, user_telegram_id)
+        VALUES ($1, $2)
+        ON CONFLICT (group_message_id) DO NOTHING;
+        """
+        await self.execute(sql, group_message_id, user_telegram_id, execute=True)
+
+    async def get_support_user(self, group_message_id: int) -> int | None:
+        sql = "SELECT user_telegram_id FROM support_messages WHERE group_message_id = $1"
+        return await self.execute(sql, group_message_id, fetchval=True)
 
     async def create_table_user_access(self):
         # User Access jadvali (legacy modulga moslik uchun qoldirilgan)
@@ -172,6 +214,8 @@ class Database:
             "ALTER TABLE courses ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 100",
             "ALTER TABLE courses ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
             "ALTER TABLE courses ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+            "ALTER TABLE courses ADD COLUMN IF NOT EXISTS video_file_id VARCHAR(500)",
+            "ALTER TABLE courses ADD COLUMN IF NOT EXISTS installment_available BOOLEAN NOT NULL DEFAULT FALSE",
         ]
         for query in alter_queries:
             await self.execute(query, execute=True)
@@ -212,6 +256,10 @@ class Database:
             "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ",
             "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS rejected_at TIMESTAMPTZ",
             "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS click_order_id INTEGER",
+            "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS coupon_id INTEGER REFERENCES coupons(id) ON DELETE SET NULL",
+            "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS original_amount INTEGER",
+            "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS coupon_discount INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS is_installment BOOLEAN NOT NULL DEFAULT FALSE",
         ]
         for query in alter_queries:
             await self.execute(query, execute=True)
@@ -404,6 +452,7 @@ class Database:
         price: int,
         video_count: int,
         thumbnail: str | None = None,
+        video_file_id: str | None = None,
         telegram_link: str | None = None,
         free_telegram_link: str | None = None,
         show_free_button: bool = False,
@@ -418,11 +467,11 @@ class Database:
     ):
         sql = """
         INSERT INTO courses (
-            name, description, price, video_count, thumbnail, telegram_link,
+            name, description, price, video_count, thumbnail, video_file_id, telegram_link,
             free_telegram_link, show_free_button, show_paid_button,
             author, duration, target_exam, includes, access_type, sort_order, is_active, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW())
         RETURNING *;
         """
         return await self.execute(
@@ -432,6 +481,7 @@ class Database:
             price,
             video_count,
             thumbnail,
+            video_file_id,
             telegram_link,
             free_telegram_link,
             show_free_button,
@@ -453,6 +503,7 @@ class Database:
             "price",
             "video_count",
             "thumbnail",
+            "video_file_id",
             "telegram_link",
             "free_telegram_link",
             "show_free_button",
@@ -656,10 +707,14 @@ class Database:
             u.telegram_id,
             u.username,
             u.full_name,
-            u.phone
+            u.first_name,
+            u.phone,
+            coup.code AS coupon_code,
+            coup.name AS coupon_name
         FROM purchases p
         JOIN courses c ON c.id = p.course_id
         JOIN users u ON u.id = p.user_id
+        LEFT JOIN coupons coup ON coup.id = p.coupon_id
         WHERE p.id = $1;
         """
         return await self.execute(sql, purchase_id, fetchrow=True)
@@ -739,7 +794,7 @@ class Database:
         SELECT COUNT(*)
         FROM purchases p
         JOIN users u ON u.id = p.user_id
-        WHERE u.telegram_id = $1;
+        WHERE u.telegram_id = $1 AND p.status = 'approved';
         """
         return await self.execute(sql, telegram_id, fetchval=True)
 
@@ -765,11 +820,33 @@ class Database:
         FROM purchases p
         JOIN users u ON u.id = p.user_id
         JOIN courses c ON c.id = p.course_id
-        WHERE u.telegram_id = $1
+        WHERE u.telegram_id = $1 AND p.status = 'approved'
         ORDER BY p.created_at DESC, p.id DESC
         LIMIT $2 OFFSET $3;
         """
         return await self.execute(sql, telegram_id, limit, offset, fetch=True)
+
+    async def get_pending_course_purchase(self, telegram_id: int, course_id: int) -> dict | None:
+        sql = """
+        SELECT p.*
+        FROM purchases p
+        JOIN users u ON u.id = p.user_id
+        WHERE u.telegram_id = $1 AND p.course_id = $2
+          AND p.status = 'pending' AND p.purchase_type = 'paid'
+        ORDER BY p.id DESC
+        LIMIT 1;
+        """
+        return await self.execute(sql, telegram_id, course_id, fetchrow=True)
+
+    async def cancel_pending_purchases_for_course(self, telegram_id: int, course_id: int) -> None:
+        user = await self.select_user(telegram_id=telegram_id)
+        if not user:
+            return
+        await self.execute(
+            "UPDATE purchases SET status='rejected', rejected_at=NOW(), updated_at=NOW() "
+            "WHERE user_id=$1 AND course_id=$2 AND status='pending' AND purchase_type='paid';",
+            user["id"], course_id, execute=True,
+        )
 
     async def select_user_purchase(self, telegram_id: int, purchase_id: int):
         sql = """
@@ -785,13 +862,452 @@ class Database:
             u.telegram_id,
             u.username,
             u.full_name,
-            u.phone
+            u.first_name,
+            u.phone,
+            coup.code AS coupon_code,
+            coup.name AS coupon_name
         FROM purchases p
         JOIN users u ON u.id = p.user_id
         JOIN courses c ON c.id = p.course_id
+        LEFT JOIN coupons coup ON coup.id = p.coupon_id
         WHERE u.telegram_id = $1 AND p.id = $2;
         """
         return await self.execute(sql, telegram_id, purchase_id, fetchrow=True)
+
+    async def select_users_with_any_approved_purchase(self):
+        sql = """
+        SELECT DISTINCT u.*
+        FROM users u
+        JOIN purchases p ON p.user_id = u.id
+        WHERE p.status = 'approved'
+        ORDER BY u.id ASC
+        """
+        return await self.execute(sql, fetch=True)
+
+    async def select_users_by_course_approved(self, course_id: int):
+        sql = """
+        SELECT DISTINCT u.*
+        FROM users u
+        JOIN purchases p ON p.user_id = u.id
+        WHERE p.course_id = $1 AND p.status = 'approved'
+        ORDER BY u.id ASC
+        """
+        return await self.execute(sql, course_id, fetch=True)
+
+    async def select_course_purchase_export(self, course_id: int):
+        sql = """
+        SELECT DISTINCT ON (u.id)
+            u.full_name, u.first_name, u.last_name, u.username, u.telegram_id, u.phone,
+            c.name AS course_name,
+            p.id AS purchase_id,
+            p.amount,
+            p.purchase_type,
+            p.status,
+            p.approved_at AS purchase_date,
+            p.created_at AS order_date,
+            p.card_number_used,
+            p.admin_note,
+            p.invite_link,
+            p.click_order_id,
+            CASE WHEN p.receipt_file_id IS NOT NULL THEN 'Ha' ELSE 'Yo''q' END AS has_receipt
+        FROM users u
+        JOIN purchases p ON p.user_id = u.id
+        JOIN courses c ON c.id = p.course_id
+        WHERE p.course_id = $1 AND p.status = 'approved'
+        ORDER BY u.id, p.approved_at DESC
+        """
+        return await self.execute(sql, course_id, fetch=True)
+
+    async def select_all_buyers_export(self):
+        sql = """
+        SELECT
+            u.full_name, u.first_name, u.last_name, u.username, u.telegram_id, u.phone,
+            c.name AS course_name,
+            p.id AS purchase_id,
+            p.amount,
+            p.purchase_type,
+            p.status,
+            p.approved_at AS purchase_date,
+            p.created_at AS order_date,
+            p.card_number_used,
+            p.admin_note,
+            p.invite_link,
+            p.click_order_id,
+            CASE WHEN p.receipt_file_id IS NOT NULL THEN 'Ha' ELSE 'Yo''q' END AS has_receipt
+        FROM purchases p
+        JOIN users u ON u.id = p.user_id
+        JOIN courses c ON c.id = p.course_id
+        WHERE p.status = 'approved'
+        ORDER BY u.id ASC, p.approved_at DESC
+        """
+        return await self.execute(sql, fetch=True)
+
+    # ── COUPONS ──────────────────────────────────────────────────────────────────
+
+    async def create_table_coupons(self):
+        sql = """
+        CREATE TABLE IF NOT EXISTS coupons (
+            id SERIAL PRIMARY KEY,
+            code VARCHAR(50) UNIQUE NOT NULL,
+            name VARCHAR(200) NOT NULL DEFAULT '',
+            discount_percent INTEGER NOT NULL DEFAULT 0,
+            discount_amount INTEGER NOT NULL DEFAULT 0,
+            max_uses INTEGER,
+            uses_count INTEGER NOT NULL DEFAULT 0,
+            course_id INTEGER REFERENCES courses(id) ON DELETE SET NULL,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            expires_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """
+        await self.execute(sql, execute=True)
+
+    async def add_coupon(
+        self,
+        code: str,
+        name: str,
+        discount_percent: int,
+        discount_amount: int,
+        max_uses: int | None,
+        course_id: int | None,
+        expires_at=None,
+    ) -> dict | None:
+        sql = """
+        INSERT INTO coupons (code, name, discount_percent, discount_amount, max_uses, course_id, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING *;
+        """
+        return await self.execute(
+            sql, code.upper(), name, discount_percent, discount_amount,
+            max_uses, course_id, expires_at, fetchrow=True,
+        )
+
+    async def get_coupon_by_code(self, code: str) -> dict | None:
+        sql = "SELECT * FROM coupons WHERE UPPER(code) = UPPER($1);"
+        return await self.execute(sql, code, fetchrow=True)
+
+    async def has_user_used_coupon(self, coupon_id: int, telegram_id: int) -> bool:
+        sql = """
+        SELECT COUNT(*) FROM purchases p
+        JOIN users u ON u.id = p.user_id
+        WHERE p.coupon_id = $1 AND u.telegram_id = $2 AND p.status != 'rejected';
+        """
+        count = await self.execute(sql, coupon_id, telegram_id, fetchval=True)
+        return (count or 0) > 0
+
+    async def increment_coupon_uses(self, coupon_id: int) -> None:
+        await self.execute(
+            "UPDATE coupons SET uses_count = uses_count + 1 WHERE id = $1",
+            coupon_id, execute=True,
+        )
+
+    async def list_coupons(self, is_active: bool | None = None) -> list:
+        if is_active is None:
+            sql = "SELECT * FROM coupons ORDER BY created_at DESC;"
+            return await self.execute(sql, fetch=True)
+        sql = "SELECT * FROM coupons WHERE is_active = $1 ORDER BY created_at DESC;"
+        return await self.execute(sql, is_active, fetch=True)
+
+    async def get_coupon(self, coupon_id: int) -> dict | None:
+        return await self.execute("SELECT * FROM coupons WHERE id = $1;", coupon_id, fetchrow=True)
+
+    async def toggle_coupon_active(self, coupon_id: int) -> dict | None:
+        sql = "UPDATE coupons SET is_active = NOT is_active WHERE id = $1 RETURNING *;"
+        return await self.execute(sql, coupon_id, fetchrow=True)
+
+    async def delete_coupon(self, coupon_id: int) -> None:
+        await self.execute("DELETE FROM coupons WHERE id = $1;", coupon_id, execute=True)
+
+    async def create_custom_purchase(
+        self,
+        telegram_id: int,
+        course_id: int,
+        amount: int,
+        coupon_id: int | None = None,
+        original_amount: int | None = None,
+        coupon_discount: int = 0,
+        is_installment: bool = False,
+        click_order_id: int | None = None,
+    ) -> dict | None:
+        user = await self.select_user(telegram_id=telegram_id)
+        if not user:
+            return None
+        sql = """
+        INSERT INTO purchases (
+            user_id, course_id, amount, status, purchase_type,
+            coupon_id, original_amount, coupon_discount, is_installment, click_order_id, updated_at
+        )
+        VALUES ($1, $2, $3, 'pending', 'paid', $4, $5, $6, $7, $8, NOW())
+        RETURNING id;
+        """
+        purchase_id = await self.execute(
+            sql, user["id"], course_id, amount,
+            coupon_id, original_amount or amount, coupon_discount, is_installment, click_order_id,
+            fetchval=True,
+        )
+        if not purchase_id:
+            return None
+        return await self.select_purchase_by_id(purchase_id)
+
+    # ── INSTALLMENT PLANS ─────────────────────────────────────────────────────
+
+    async def create_table_installment_plans(self):
+        sql = """
+        CREATE TABLE IF NOT EXISTS installment_plans (
+            id SERIAL PRIMARY KEY,
+            purchase_id INTEGER UNIQUE NOT NULL REFERENCES purchases(id) ON DELETE CASCADE,
+            total_amount INTEGER NOT NULL,
+            installments_count INTEGER NOT NULL,
+            paid_count INTEGER NOT NULL DEFAULT 0,
+            status VARCHAR(20) NOT NULL DEFAULT 'active',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """
+        await self.execute(sql, execute=True)
+
+    async def create_table_installment_payments(self):
+        sql = """
+        CREATE TABLE IF NOT EXISTS installment_payments (
+            id SERIAL PRIMARY KEY,
+            plan_id INTEGER NOT NULL REFERENCES installment_plans(id) ON DELETE CASCADE,
+            payment_number INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'pending',
+            due_date DATE,
+            paid_at TIMESTAMPTZ,
+            click_order_id INTEGER,
+            approved_by BIGINT,
+            admin_note TEXT,
+            last_notified_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        """
+        await self.execute(sql, execute=True)
+        await self.execute(
+            "ALTER TABLE installment_payments ADD COLUMN IF NOT EXISTS click_order_id INTEGER;",
+            execute=True,
+        )
+
+    async def create_installment_plan(
+        self, purchase_id: int, total_amount: int, installments_count: int
+    ) -> dict | None:
+        from datetime import date, timedelta
+
+        plan_sql = """
+        INSERT INTO installment_plans (purchase_id, total_amount, installments_count)
+        VALUES ($1, $2, $3)
+        RETURNING id;
+        """
+        plan_id = await self.execute(
+            plan_sql, purchase_id, total_amount, installments_count, fetchval=True
+        )
+        if not plan_id:
+            return None
+
+        per = total_amount // installments_count
+        remainder = total_amount - per * (installments_count - 1)
+
+        for i in range(1, installments_count + 1):
+            amt = remainder if i == installments_count else per
+            due = None if i == 1 else date.today() + timedelta(days=30 * (i - 1))
+            await self.execute(
+                """
+                INSERT INTO installment_payments (plan_id, payment_number, amount, due_date)
+                VALUES ($1, $2, $3, $4);
+                """,
+                plan_id, i, amt, due, execute=True,
+            )
+
+        return await self.execute(
+            "SELECT * FROM installment_plans WHERE id = $1;", plan_id, fetchrow=True
+        )
+
+    async def get_installment_plan_by_purchase(self, purchase_id: int) -> dict | None:
+        return await self.execute(
+            "SELECT * FROM installment_plans WHERE purchase_id = $1;", purchase_id, fetchrow=True
+        )
+
+    async def get_installment_payments(self, plan_id: int) -> list:
+        return await self.execute(
+            "SELECT * FROM installment_payments WHERE plan_id = $1 ORDER BY payment_number;",
+            plan_id, fetch=True,
+        )
+
+    async def get_next_pending_installment(self, plan_id: int) -> dict | None:
+        return await self.execute(
+            """
+            SELECT * FROM installment_payments
+            WHERE plan_id = $1 AND status = 'pending'
+            ORDER BY payment_number
+            LIMIT 1;
+            """,
+            plan_id, fetchrow=True,
+        )
+
+    async def get_installment_payment_detail(self, installment_payment_id: int) -> dict | None:
+        sql = """
+        SELECT
+            ip.*,
+            ipl.installments_count,
+            ipl.paid_count,
+            ipl.total_amount AS plan_total,
+            ipl.purchase_id,
+            p.amount AS purchase_amount,
+            p.course_id,
+            p.coupon_discount,
+            p.original_amount,
+            p.is_installment,
+            c.name AS course_name,
+            c.telegram_link AS course_telegram_link,
+            u.full_name,
+            u.first_name,
+            u.username,
+            u.telegram_id,
+            u.phone
+        FROM installment_payments ip
+        JOIN installment_plans ipl ON ipl.id = ip.plan_id
+        JOIN purchases p ON p.id = ipl.purchase_id
+        JOIN courses c ON c.id = p.course_id
+        JOIN users u ON u.id = p.user_id
+        WHERE ip.id = $1;
+        """
+        return await self.execute(sql, installment_payment_id, fetchrow=True)
+
+    async def set_installment_click_order(
+        self, installment_payment_id: int, click_order_id: int
+    ) -> None:
+        await self.execute(
+            "UPDATE installment_payments SET click_order_id = $1 WHERE id = $2;",
+            click_order_id, installment_payment_id, execute=True,
+        )
+
+    async def approve_installment_by_click(
+        self, click_order_id: int, invite_link: str | None
+    ) -> dict | None:
+        sql = """
+        SELECT ip.*,
+               ipl.purchase_id, ipl.installments_count, ipl.paid_count, ipl.total_amount AS plan_total,
+               p.course_id, p.is_installment,
+               c.telegram_link AS course_telegram_link
+        FROM installment_payments ip
+        JOIN installment_plans ipl ON ipl.id = ip.plan_id
+        JOIN purchases p ON p.id = ipl.purchase_id
+        JOIN courses c ON c.id = p.course_id
+        WHERE ip.click_order_id = $1 AND ip.status = 'pending'
+        LIMIT 1;
+        """
+        row = await self.execute(sql, click_order_id, fetchrow=True)
+        if not row:
+            return None
+
+        updated = await self.approve_installment_payment(row["id"], 0)
+        if not updated:
+            return None
+
+        if row["payment_number"] == 1:
+            link = invite_link or row["course_telegram_link"]
+            await self.execute(
+                """
+                UPDATE purchases SET status='approved', invite_link=COALESCE($2, invite_link),
+                    approved_at=NOW(), updated_at=NOW()
+                WHERE id=$1 AND status='pending';
+                """,
+                row["purchase_id"], link, execute=True,
+            )
+        return updated
+
+    async def approve_installment_payment(
+        self, installment_payment_id: int, approved_by: int, note: str = ""
+    ) -> dict | None:
+        await self.execute(
+            """
+            UPDATE installment_payments
+            SET status = 'paid', paid_at = NOW(), approved_by = $2, admin_note = $3
+            WHERE id = $1;
+            """,
+            installment_payment_id, approved_by, note or "Tasdiqlandi.", execute=True,
+        )
+        detail = await self.get_installment_payment_detail(installment_payment_id)
+        if not detail:
+            return None
+
+        plan_id = detail["plan_id"]
+        new_paid = await self.execute(
+            "UPDATE installment_plans SET paid_count = paid_count + 1 WHERE id = $1 RETURNING paid_count;",
+            plan_id, fetchval=True,
+        )
+        if new_paid and new_paid >= detail["installments_count"]:
+            await self.execute(
+                "UPDATE installment_plans SET status = 'completed' WHERE id = $1;",
+                plan_id, execute=True,
+            )
+        return await self.get_installment_payment_detail(installment_payment_id)
+
+    async def reject_installment_payment(
+        self, installment_payment_id: int, rejected_by: int, note: str = ""
+    ) -> dict | None:
+        await self.execute(
+            """
+            UPDATE installment_payments
+            SET status = 'pending', approved_by = $2, admin_note = $3, receipt_file_id = NULL
+            WHERE id = $1;
+            """,
+            installment_payment_id, rejected_by,
+            note or "Chek tasdiqlanmadi. Qayta yuboring.", execute=True,
+        )
+        return await self.get_installment_payment_detail(installment_payment_id)
+
+    async def get_upcoming_due_installments(self) -> list:
+        sql = """
+        SELECT
+            ip.id, ip.plan_id, ip.payment_number, ip.amount, ip.due_date, ip.last_notified_at,
+            ipl.installments_count, ipl.paid_count, ipl.purchase_id,
+            c.name AS course_name,
+            u.telegram_id
+        FROM installment_payments ip
+        JOIN installment_plans ipl ON ipl.id = ip.plan_id
+        JOIN purchases p ON p.id = ipl.purchase_id
+        JOIN courses c ON c.id = p.course_id
+        JOIN users u ON u.id = p.user_id
+        WHERE ip.status = 'pending'
+          AND ip.due_date IS NOT NULL
+          AND ip.due_date <= CURRENT_DATE + INTERVAL '3 days'
+          AND (ip.last_notified_at IS NULL
+               OR ip.last_notified_at < NOW() - INTERVAL '23 hours')
+        ORDER BY ip.due_date;
+        """
+        return await self.execute(sql, fetch=True)
+
+    async def mark_installment_notified(self, installment_payment_id: int) -> None:
+        await self.execute(
+            "UPDATE installment_payments SET last_notified_at = NOW() WHERE id = $1;",
+            installment_payment_id, execute=True,
+        )
+
+    async def get_user_installment_plans(self, telegram_id: int) -> list:
+        sql = """
+        SELECT
+            ipl.*,
+            c.name AS course_name,
+            p.coupon_discount,
+            p.original_amount
+        FROM installment_plans ipl
+        JOIN purchases p ON p.id = ipl.purchase_id
+        JOIN courses c ON c.id = p.course_id
+        JOIN users u ON u.id = p.user_id
+        WHERE u.telegram_id = $1 AND ipl.status = 'active'
+        ORDER BY ipl.created_at DESC;
+        """
+        return await self.execute(sql, telegram_id, fetch=True)
+
+    async def get_installment_plan(self, plan_id: int) -> dict | None:
+        return await self.execute(
+            "SELECT * FROM installment_plans WHERE id = $1;", plan_id, fetchrow=True
+        )
+
+    async def set_course_installment(self, course_id: int, enabled: bool) -> dict | None:
+        sql = "UPDATE courses SET installment_available = $1 WHERE id = $2 RETURNING *;"
+        return await self.execute(sql, enabled, course_id, fetchrow=True)
 
     async def delete_users(self):
         # Barcha foydalanuvchilarni o'chirish

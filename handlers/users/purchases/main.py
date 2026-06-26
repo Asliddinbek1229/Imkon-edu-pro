@@ -9,7 +9,7 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from handlers.users.payment.main import PaymentActionCallback, render_payment_instructions
+from handlers.users.payment.main import NextInstallmentCallback
 from loader import db
 from utils.misc.api.course_payment import check_order_status, create_course_payment
 
@@ -138,7 +138,7 @@ def purchases_keyboard(purchases: list, page: int, total: int) -> InlineKeyboard
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def purchase_detail_text(purchase) -> str:
+def purchase_detail_text(purchase, plan=None, payments=None) -> str:
     purchase_type = purchase.get("purchase_type", "paid")
     is_free_type = purchase_type == "free"
     access_link = purchase["invite_link"] or (
@@ -146,43 +146,73 @@ def purchase_detail_text(purchase) -> str:
     ) or "-"
     admin_note = purchase["admin_note"] or "-"
     type_label = "🎁 Bepul kirish" if is_free_type else "💎 To'lov orqali"
+    coupon_line = ""
+    if purchase.get("coupon_code"):
+        coupon_line = f"\n🎟 Kupon: <code>{html.quote(purchase['coupon_code'])}</code>"
+        orig = purchase.get("original_amount", 0) or 0
+        disc = purchase.get("coupon_discount", 0) or 0
+        if disc:
+            coupon_line += f" (−{format_price(disc)}, asl narx: {format_price(orig)})"
+
     approved_line = ""
     if purchase["status"] == "approved":
-        approved_line = (
-            "\n🎉 <b>Kirish huquqi berilgan.</b>\n"
-            "Guruhga kirgach pinned postni o'qing va darslarni tartib bilan o'rganing."
-        )
+        if access_link:
+            approved_line = (
+                "\n\n🎉 <b>Kirish huquqi berilgan.</b>\n"
+                "Pastdagi tugma orqali guruh yoki kanalga qo'shiling.\n"
+                "Kirgach pinned postni o'qing va darslarni tartib bilan o'rganing."
+            )
+        else:
+            approved_line = "\n\n🎉 <b>Kirish huquqi berilgan.</b>"
     elif purchase["status"] == "pending":
         if purchase.get("click_order_id"):
             approved_line = (
-                "\n⏳ <b>CLICK to'lov kutilmoqda.</b>\n"
+                "\n\n⏳ <b>CLICK to'lov kutilmoqda.</b>\n"
                 "To'lov tasdiqlangach kurs linki avtomatik yuboriladi."
             )
         else:
             approved_line = (
-                "\n⏳ <b>To'lov tekshirilmoqda.</b>\n"
+                "\n\n⏳ <b>To'lov tekshirilmoqda.</b>\n"
                 "Admin tasdiqlagach kurs linki avtomatik ko'rinadi."
             )
     elif purchase["status"] == "rejected":
-        approved_line = "\n❌ <b>To'lov rad etilgan.</b> Qayta sotib olish mumkin."
+        admin_note_txt = purchase.get("admin_note") or "Rad etildi."
+        approved_line = f"\n\n❌ <b>To'lov rad etilgan.</b>\nSabab: {html.quote(admin_note_txt)}"
+
+    installment_line = ""
+    if plan and payments:
+        paid = sum(1 for p in payments if p["status"] == "paid")
+        total = plan["installments_count"]
+        installment_line = (
+            f"\n\n📅 <b>Muddatli to'lov: {paid}/{total}</b>\n"
+            f"Umumiy summa: <b>{format_price(plan['total_amount'])}</b>"
+        )
+        pending_payments = [p for p in payments if p["status"] == "pending"]
+        if pending_payments:
+            nxt = pending_payments[0]
+            due_str = nxt["due_date"].strftime("%d.%m.%Y") if nxt.get("due_date") else "—"
+            installment_line += (
+                f"\nKeyingi to'lov: <b>{format_price(nxt['amount'])}</b> "
+                f"({nxt['payment_number']}/{total}) – {due_str}"
+            )
 
     return (
         f"📘 <b>{html.quote(purchase['course_name'])}</b>\n\n"
         f"Tur: <b>{type_label}</b>\n"
         f"Holat: <b>{status_label(purchase['status'], purchase_type)}</b>\n"
-        f"Summa: <b>{format_price(purchase['amount'])}</b>\n"
+        f"Summa: <b>{format_price(purchase['amount'])}</b>"
+        f"{coupon_line}\n"
         f"Video: <b>{purchase['course_video_count']} ta</b>\n"
         f"Kirish: <b>{html.quote(purchase['course_access_type'])}</b>\n"
         f"Sana: {format_date(purchase['created_at'])}\n"
         f"Tasdiqlangan: {format_date(purchase['approved_at'])}\n"
-        f"Rad etilgan: {format_date(purchase['rejected_at'])}\n"
-        f"Admin izohi: {html.quote(admin_note)}\n"
-        f"Kurs linki: {html.quote(access_link)}"
+        f"Rad etilgan: {format_date(purchase['rejected_at'])}"
+        f"{installment_line}"
         f"{approved_line}"
     )
 
 
-def purchase_detail_keyboard(purchase, page: int) -> InlineKeyboardMarkup:
+def purchase_detail_keyboard(purchase, page: int, plan=None, payments=None) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     purchase_type = purchase.get("purchase_type", "paid")
     is_free_type = purchase_type == "free"
@@ -191,57 +221,49 @@ def purchase_detail_keyboard(purchase, page: int) -> InlineKeyboardMarkup:
     )
 
     if purchase["status"] == "approved" and access_link:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="🔗 Kursga kirish",
-                    url=access_link,
-                    style=ButtonStyle.SUCCESS,
-                )
-            ]
-        )
+        rows.append([
+            InlineKeyboardButton(text="🔗 Kursga qo'shilish", url=access_link, style=ButtonStyle.SUCCESS)
+        ])
 
-    if purchase["status"] == "pending" and not purchase.get("click_order_id") and not is_free_type:
-        receipt_text = "📸 Chekni qayta yuborish" if purchase["receipt_file_id"] else "📸 Chek yuborish"
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=receipt_text,
-                    callback_data=PaymentActionCallback(action="instructions", purchase_id=purchase["id"]).pack(),
-                    style=ButtonStyle.SUCCESS,
-                )
-            ]
-        )
+    is_installment = purchase.get("is_installment", False)
 
-    if purchase["status"] == "rejected":
-        rows.append(
-            [
+    if is_installment and plan and payments:
+        pending = [p for p in payments if p["status"] == "pending"]
+        if pending and purchase["status"] == "approved":
+            nxt = pending[0]
+            has_click = bool(nxt.get("click_order_id"))
+            btn_text = "⏳ To'lov kutilmoqda (CLICK)" if has_click else "💳 Keyingi to'lovni amalga oshirish"
+            rows.append([
                 InlineKeyboardButton(
-                    text="🔁 Qayta sotib olish",
-                    callback_data=MyPurchaseActionCallback(
-                        action="retry",
-                        purchase_id=purchase["id"],
-                        page=page,
+                    text=btn_text,
+                    callback_data=NextInstallmentCallback(
+                        plan_id=plan["id"], purchase_id=purchase["id"]
                     ).pack(),
-                    style=ButtonStyle.SUCCESS,
+                    style=ButtonStyle.PRIMARY if has_click else ButtonStyle.SUCCESS,
                 )
-            ]
-        )
+            ])
 
-    rows.append(
-        [
+    if purchase["status"] == "rejected" and not is_installment:
+        rows.append([
             InlineKeyboardButton(
-                text="↩️ Orqaga",
-                callback_data=MyPurchasesPageCallback(page=page).pack(),
-                style=ButtonStyle.PRIMARY,
-            ),
-            InlineKeyboardButton(
-                text="❌ Bekor qilish",
-                callback_data=MyPurchaseActionCallback(action="cancel").pack(),
-                style=ButtonStyle.DANGER,
-            ),
-        ]
-    )
+                text="🔁 Qayta sotib olish",
+                callback_data=MyPurchaseActionCallback(action="retry", purchase_id=purchase["id"], page=page).pack(),
+                style=ButtonStyle.SUCCESS,
+            )
+        ])
+
+    rows.append([
+        InlineKeyboardButton(
+            text="↩️ Orqaga",
+            callback_data=MyPurchasesPageCallback(page=page).pack(),
+            style=ButtonStyle.PRIMARY,
+        ),
+        InlineKeyboardButton(
+            text="❌ Bekor qilish",
+            callback_data=MyPurchaseActionCallback(action="cancel").pack(),
+            style=ButtonStyle.DANGER,
+        ),
+    ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -303,7 +325,6 @@ async def render_purchase_detail(
         await edit_or_send_purchases(call, page=page, answer=False)
         return
 
-    # Agar pending CLICK xaridi bo'lsa — Django dan yangilash
     if purchase["status"] == "pending" and purchase.get("click_order_id"):
         order_data = await check_order_status(purchase["click_order_id"])
         if order_data and order_data.get("paid"):
@@ -314,10 +335,17 @@ async def render_purchase_detail(
             if updated:
                 purchase = updated
 
+    plan = None
+    payments = None
+    if purchase.get("is_installment"):
+        plan = await db.get_installment_plan_by_purchase(purchase["id"])
+        if plan:
+            payments = await db.get_installment_payments(plan["id"])
+
     if answer:
         await call.answer()
-    text = purchase_detail_text(purchase)
-    markup = purchase_detail_keyboard(purchase, page=page)
+    text = purchase_detail_text(purchase, plan=plan, payments=payments)
+    markup = purchase_detail_keyboard(purchase, page=page, plan=plan, payments=payments)
     if call.message.photo:
         await call.message.delete()
         await call.message.answer(text, reply_markup=markup)
