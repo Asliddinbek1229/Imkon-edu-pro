@@ -1,20 +1,14 @@
 from __future__ import annotations
 
-from aiogram import F, Router, html, types
+from aiogram import Router, html, types
 from aiogram.enums import ButtonStyle
 from aiogram.filters.callback_data import CallbackData
-from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from loader import bot, db
+from loader import db
 from utils.misc.api.course_payment import create_course_payment
 
 payment_router = Router()
-
-
-class PaymentActionCallback(CallbackData, prefix="pay"):
-    action: str
-    purchase_id: int = 0
 
 
 class NextInstallmentCallback(CallbackData, prefix="nextinst"):

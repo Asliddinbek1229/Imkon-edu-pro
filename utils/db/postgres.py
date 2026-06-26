@@ -719,40 +719,6 @@ class Database:
         """
         return await self.execute(sql, purchase_id, fetchrow=True)
 
-    async def submit_purchase_receipt(
-        self,
-        purchase_id: int,
-        telegram_id: int,
-        receipt_file_id: str,
-        card_number_used: str | None = None,
-    ):
-        sql = """
-        UPDATE purchases p
-        SET receipt_file_id = $1,
-            card_number_used = $2,
-            status = 'pending',
-            admin_note = NULL,
-            rejected_at = NULL,
-            updated_at = NOW()
-        FROM users u
-        WHERE p.id = $3
-          AND p.user_id = u.id
-          AND u.telegram_id = $4
-          AND p.status != 'approved'
-        RETURNING p.id;
-        """
-        updated_id = await self.execute(
-            sql,
-            receipt_file_id,
-            card_number_used,
-            purchase_id,
-            telegram_id,
-            fetchval=True,
-        )
-        if not updated_id:
-            return None
-        return await self.select_purchase_by_id(updated_id)
-
     async def approve_purchase(self, purchase_id: int, approved_by: int, invite_link: str, admin_note: str | None = None):
         sql = """
         UPDATE purchases
@@ -1241,20 +1207,6 @@ class Database:
                 "UPDATE installment_plans SET status = 'completed' WHERE id = $1;",
                 plan_id, execute=True,
             )
-        return await self.get_installment_payment_detail(installment_payment_id)
-
-    async def reject_installment_payment(
-        self, installment_payment_id: int, rejected_by: int, note: str = ""
-    ) -> dict | None:
-        await self.execute(
-            """
-            UPDATE installment_payments
-            SET status = 'pending', approved_by = $2, admin_note = $3, receipt_file_id = NULL
-            WHERE id = $1;
-            """,
-            installment_payment_id, rejected_by,
-            note or "Chek tasdiqlanmadi. Qayta yuboring.", execute=True,
-        )
         return await self.get_installment_payment_detail(installment_payment_id)
 
     async def get_upcoming_due_installments(self) -> list:
