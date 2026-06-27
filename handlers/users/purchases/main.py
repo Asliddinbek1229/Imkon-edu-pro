@@ -99,44 +99,55 @@ def purchases_text(purchases: list, page: int, total: int) -> str:
 
     total_pages = max(ceil(total / PURCHASES_PER_PAGE), 1)
     lines = [
-        "🛒 <b>MENING SOTIB OLGANLARIM</b>",
-        f"Sahifa: <b>{page}/{total_pages}</b>",
+        "🛒 <b>Mening sotib olganlarim</b>",
+        f"<i>Sahifa {page} / {total_pages}  •  Jami: {total} ta kurs</i>",
         "",
     ]
+
     for index, p in enumerate(purchases, start=1):
         purchase_type = p.get("purchase_type", "paid")
-        status = status_label(p["status"], purchase_type)
-        price_str = format_price(p["amount"])
+        is_free = purchase_type == "free"
+        plan_id = p.get("plan_id")
+        plan_total = p.get("plan_total_count")
 
-        # Kupon belgisi
-        coupon_badge = ""
+        # ── Holat ikonkasi ────────────────────────────────────────────────
+        if is_free:
+            status_icon = "🎁"
+        elif plan_id and plan_total:
+            plan_done = p.get("plan_status") == "completed"
+            status_icon = "✅" if plan_done else "📅"
+        else:
+            status_icon = "✅"
+
+        # ── Narx qatori ───────────────────────────────────────────────────
+        price_str = format_price(p["amount"])
         if p.get("coupon_code"):
             pct = p.get("coupon_percent") or 0
-            coupon_badge = f"  🎟 −{pct}%" if pct else "  🎟 Kupon"
+            price_str += f" <i>(−{pct}% kupon)</i>" if pct else " <i>(kupon)</i>"
 
-        # Bo'lib to'lash holati
-        installment_badge = ""
-        if p.get("plan_id") and p.get("plan_total_count"):
+        # ── Bo'lib to'lash holati ─────────────────────────────────────────
+        install_line = ""
+        if plan_id and plan_total:
             paid_n = p.get("plan_paid_count") or 0
-            total_n = p["plan_total_count"]
             plan_status = p.get("plan_status", "active")
             if plan_status == "completed":
-                installment_badge = f"  📊 {paid_n}/{total_n} ✅"
+                install_line = f"\n     └ 📊 {paid_n}/{plan_total} to'lov ✅ yakunlandi"
             else:
-                installment_badge = f"  📊 {paid_n}/{total_n} to'landi"
-                # Keyingi to'lov sanasi
+                bar = "▓" * paid_n + "░" * (plan_total - paid_n)
                 nxt = p.get("next_due_date")
-                if nxt:
-                    installment_badge += f"  •  ⏰ {_fmt_date_short(nxt)}"
+                urgency = _days_label(nxt) if nxt else ""
+                due_str = f"  ⏰ {_fmt_date_short(nxt)}{urgency}" if nxt else ""
+                install_line = f"\n     └ [{bar}] {paid_n}/{plan_total}{due_str}"
 
         lines.append(
-            f"{index}. <b>{html.quote(p['course_name'])}</b>\n"
-            f"   {status}  •  {price_str}{coupon_badge}\n"
-            f"   📅 {_fmt_date_short(p['created_at'])}{installment_badge}"
+            f"<b>{index}.</b> {status_icon} <b>{html.quote(p['course_name'])}</b>\n"
+            f"     💰 {price_str}   📅 {_fmt_date_short(p['created_at'])}"
+            f"{install_line}"
         )
+        if index < len(purchases):
+            lines.append("")   # kurslar orasida bo'sh qator
 
-    lines.append("")
-    lines.append("Batafsil ko'rish uchun pastdagi raqamni tanlang.")
+    lines += ["", "👇 Batafsil ko'rish uchun raqamni tanlang:"]
     return "\n".join(lines)
 
 
