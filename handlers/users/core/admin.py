@@ -552,6 +552,25 @@ def admin_course_detail_text(course) -> str:
     )
 
 
+def _caption_warning(course) -> str | None:
+    total = len(admin_course_detail_text(course))
+    if total <= 1024:
+        return None
+    excess = total - 1024
+    desc_len = len(course.get("description") or "")
+    name_len = len(course.get("name") or "")
+    parts = [
+        "⚠️ <b>Caption limit oshib ketdi!</b>",
+        f"Jami belgilar: <b>{total}</b> / 1024 (<b>+{excess}</b> ta ortiqcha)\n",
+    ]
+    if desc_len > 150:
+        parts.append(f"📝 Tavsif: <b>{desc_len}</b> belgi — eng ko'p joy olayapti, qisqartiring")
+    if name_len > 60:
+        parts.append(f"📌 Nomi: <b>{name_len}</b> belgi — nomni qisqartiring")
+    parts.append("\n<i>Kurs sahifasini to'g'ri ko'rsatish uchun yuqoridagi maydonlarni qisqartiring.</i>")
+    return "\n".join(parts)
+
+
 def admin_course_detail_keyboard(course) -> InlineKeyboardMarkup:
     status_button_text = "✅ Holat: ko'rinadi" if course["is_active"] else "🚫 Holat: yopiq"
     toggle_style = ButtonStyle.DANGER if course["is_active"] else ButtonStyle.SUCCESS
@@ -757,19 +776,27 @@ async def render_admin_course_detail(call: types.CallbackQuery, course_id: int) 
 
     text = admin_course_detail_text(course)
     markup = admin_course_detail_keyboard(course)
-    if course["thumbnail"]:
-        if call.message.photo:
-            await call.message.edit_caption(caption=text, reply_markup=markup)
-            return
-        await call.message.delete()
-        await call.message.answer_photo(photo=course["thumbnail"], caption=text, reply_markup=markup)
-        return
+    caption_too_long = len(text) > 1024
 
-    if call.message.photo:
+    if course["thumbnail"]:
+        if caption_too_long:
+            await call.message.delete()
+            await call.message.answer_photo(photo=course["thumbnail"])
+            await call.message.answer(text, reply_markup=markup)
+        elif call.message.photo:
+            await call.message.edit_caption(caption=text, reply_markup=markup)
+        else:
+            await call.message.delete()
+            await call.message.answer_photo(photo=course["thumbnail"], caption=text, reply_markup=markup)
+    elif call.message.photo:
         await call.message.delete()
         await call.message.answer(text, reply_markup=markup)
-        return
-    await call.message.edit_text(text, reply_markup=markup)
+    else:
+        await call.message.edit_text(text, reply_markup=markup)
+
+    warning = _caption_warning(course)
+    if warning:
+        await call.message.answer(warning)
 
 
 @router.message(Command("admin"), IsBotAdminFilter(ADMINS))
@@ -1198,6 +1225,9 @@ async def admin_course_add_video(message: types.Message, state: FSMContext):
         sort_order=data["sort_order"],
     )
     await state.clear()
+    warning = _caption_warning(course)
+    if warning:
+        await message.answer(warning)
     await message.answer(
         f"✅ Kurs yaratildi: <b>{html.quote(course['name'])}</b>",
         reply_markup=main_menu_keyboard(user_id=message.from_user.id),
