@@ -2142,11 +2142,28 @@ async def admin_broadcast_cancel(call: types.CallbackQuery, state: FSMContext):
 EXCEL_COURSES_PER_PAGE = 8
 
 BUYER_HEADINGS = [
+    # Foydalanuvchi
     "To'liq ism", "Ism", "Familiya", "Username", "Telegram ID", "Telefon",
-    "Kurs nomi", "Xarid ID", "To'langan summa", "To'lov turi", "Holat",
-    "Tasdiq. sana", "Buyurtma sanasi", "Karta raqami", "Admin izohi",
-    "Invite link", "CLICK order ID", "Chek bormi",
+    # Kurs va narx
+    "Kurs nomi", "Kursning asl narxi",
+    # Kupon
+    "Kupon kodi", "Kupon nomi", "Chegirma (%)", "Chegirma summasi", "Chegirmali narx",
+    # Xarid
+    "Xarid ID", "To'lov usuli",
+    # Moliyaviy holat
+    "To'langan summa (haqiqiy)", "Qolgan qarz", "Oylik to'lov narxi",
+    "To'lov holati", "Keyingi to'lov sanasi",
+    # Umumiy
+    "To'lov turi", "Holat", "Tasdiq. sana", "Buyurtma sanasi",
+    "Karta raqami", "Admin izohi", "Invite link", "CLICK order ID", "Chek bormi",
 ]
+
+# BUYER_HEADINGS kolumn indekslari (summary uchun)
+_COL_ORIG_PRICE   = 8   # Kursning asl narxi
+_COL_DISCOUNT     = 12  # Chegirma summasi
+_COL_DISC_PRICE   = 13  # Chegirmali narx
+_COL_PAID         = 16  # To'langan summa (haqiqiy)
+_COL_DEBT         = 17  # Qolgan qarz
 
 
 def format_date_val(value) -> str:
@@ -2157,18 +2174,77 @@ def format_date_val(value) -> str:
     return str(value)
 
 
+def _fmt_som(amount) -> str:
+    if amount is None:
+        return "—"
+    try:
+        v = int(amount)
+        return f"{v:,}".replace(",", " ") + " so'm"
+    except Exception:
+        return str(amount)
+
+
 def _buyer_row(r: dict) -> tuple:
+    is_installment = bool(r.get("is_installment"))
+    is_free = r.get("purchase_type") == "free"
+    plan_id = r.get("plan_id")
+
+    orig_price   = r.get("course_original_price") or 0
+    disc_amount  = r.get("coupon_discount") or 0
+    final_price  = r.get("discounted_amount") or 0
+
+    # Haqiqiy to'langan summa
+    if is_installment and plan_id:
+        actually_paid = int(r.get("installment_paid_sum") or 0)
+        plan_total    = int(r.get("plan_total") or final_price)
+        remaining     = max(plan_total - actually_paid, 0)
+        n_installments = r.get("installments_count") or 1
+        monthly_pay   = plan_total // n_installments if n_installments else plan_total
+        paid_count    = r.get("paid_count") or 0
+        payment_status = f"{paid_count}/{n_installments}"
+        plan_status    = r.get("plan_status") or ""
+        payment_method = "Bo'lib to'lash"
+        next_due       = format_date_val(r.get("next_due_date")) if plan_status != "completed" else "✅ Yakunlandi"
+    else:
+        actually_paid = final_price
+        remaining     = 0
+        monthly_pay   = 0
+        payment_status = "1/1"
+        payment_method = "To'liq to'lash"
+        next_due       = "—"
+
+    coupon_code    = r.get("coupon_code") or "—"
+    coupon_name    = r.get("coupon_name") or "—"
+    coupon_percent = r.get("coupon_percent") or 0
+
     return (
+        # Foydalanuvchi
         r.get("full_name") or "—",
         r.get("first_name") or "—",
         r.get("last_name") or "—",
         f"@{r['username']}" if r.get("username") else "—",
         r.get("telegram_id"),
         r.get("phone") or "—",
+        # Kurs va narx
         r.get("course_name") or "—",
+        orig_price,
+        # Kupon
+        coupon_code,
+        coupon_name,
+        f"{coupon_percent}%" if coupon_percent else "—",
+        disc_amount if disc_amount else 0,
+        final_price,
+        # Xarid
         r.get("purchase_id"),
-        r.get("amount", 0),
-        "Bepul" if r.get("purchase_type") == "free" else "Pullik",
+        payment_method,
+        # Moliyaviy
+        actually_paid,
+        remaining,
+        monthly_pay if is_installment else "—",
+        payment_status,
+        next_due,
+        # Umumiy
+        "Bepul" if is_free else "Pullik",
         "Tasdiqlangan",
         format_date_val(r.get("purchase_date")),
         format_date_val(r.get("order_date")),
@@ -2178,6 +2254,28 @@ def _buyer_row(r: dict) -> tuple:
         r.get("click_order_id") or "—",
         r.get("has_receipt", "Yo'q"),
     )
+
+
+def _build_summary(rows: list[tuple]) -> list[tuple]:
+    """Eng pastdagi JAMI qatorini hisoblaydi."""
+    total_orig    = sum(r[_COL_ORIG_PRICE - 1] or 0 for r in rows if isinstance(r[_COL_ORIG_PRICE - 1], (int, float)))
+    total_discount = sum(r[_COL_DISCOUNT - 1] or 0 for r in rows if isinstance(r[_COL_DISCOUNT - 1], (int, float)))
+    total_disc_price = sum(r[_COL_DISC_PRICE - 1] or 0 for r in rows if isinstance(r[_COL_DISC_PRICE - 1], (int, float)))
+    total_paid    = sum(r[_COL_PAID - 1] or 0 for r in rows if isinstance(r[_COL_PAID - 1], (int, float)))
+    total_debt    = sum(r[_COL_DEBT - 1] or 0 for r in rows if isinstance(r[_COL_DEBT - 1], (int, float)))
+    n = len(rows)
+    n_install = sum(1 for r in rows if r[14] == "Bo'lib to'lash")
+    n_full    = sum(1 for r in rows if r[14] == "To'liq to'lash")
+
+    summary = [""] * len(BUYER_HEADINGS)
+    summary[0] = f"JAMI ({n} ta xaridor)"
+    summary[_COL_ORIG_PRICE - 1]  = total_orig
+    summary[_COL_DISCOUNT - 1]    = total_discount
+    summary[_COL_DISC_PRICE - 1]  = total_disc_price
+    summary[_COL_PAID - 1]        = total_paid
+    summary[_COL_DEBT - 1]        = total_debt
+    summary[14] = f"Bo'lib: {n_install} | To'liq: {n_full}"
+    return [tuple(summary)]
 
 
 def excel_menu_keyboard() -> InlineKeyboardMarkup:
@@ -2314,7 +2412,7 @@ async def admin_export_buyers(call: types.CallbackQuery):
     data = await db.select_all_buyers_export()
     rows = [_buyer_row(r) for r in data]
     file_path = "data/export_all_buyers.xlsx"
-    await export_to_excel(data=rows, headings=BUYER_HEADINGS, filepath=file_path)
+    await export_to_excel(data=rows, headings=BUYER_HEADINGS, filepath=file_path, summary_rows=_build_summary(rows))
     try:
         await call.message.edit_text(
             f"✅ <b>Tayyor</b>\n\n🛒 Barcha kurs xaridorlari — <b>{len(rows)} ta yozuv</b>",
@@ -2369,7 +2467,7 @@ async def admin_export_course_selected(call: types.CallbackQuery, callback_data:
     data = await db.select_course_purchase_export(callback_data.course_id)
     rows = [_buyer_row(r) for r in data]
     file_path = f"data/export_course_{callback_data.course_id}.xlsx"
-    await export_to_excel(data=rows, headings=BUYER_HEADINGS, filepath=file_path)
+    await export_to_excel(data=rows, headings=BUYER_HEADINGS, filepath=file_path, summary_rows=_build_summary(rows))
     try:
         await call.message.edit_text(
             f"✅ <b>Tayyor</b>\n\n📚 {html.quote(course['name'])} — <b>{len(rows)} ta xaridor</b>",

@@ -914,12 +914,15 @@ class Database:
 
     async def select_course_purchase_export(self, course_id: int):
         sql = """
-        SELECT DISTINCT ON (u.id)
+        SELECT
             u.full_name, u.first_name, u.last_name, u.username, u.telegram_id, u.phone,
             c.name AS course_name,
+            COALESCE(p.original_amount, c.price, p.amount) AS course_original_price,
             p.id AS purchase_id,
-            p.amount,
+            p.amount AS discounted_amount,
+            p.coupon_discount,
             p.purchase_type,
+            p.is_installment,
             p.status,
             p.approved_at AS purchase_date,
             p.created_at AS order_date,
@@ -927,12 +930,32 @@ class Database:
             p.admin_note,
             p.invite_link,
             p.click_order_id,
-            CASE WHEN p.receipt_file_id IS NOT NULL THEN 'Ha' ELSE 'Yo''q' END AS has_receipt
-        FROM users u
-        JOIN purchases p ON p.user_id = u.id
+            CASE WHEN p.receipt_file_id IS NOT NULL THEN 'Ha' ELSE 'Yo''q' END AS has_receipt,
+            coup.code AS coupon_code,
+            coup.name AS coupon_name,
+            coup.discount_percent AS coupon_percent,
+            ipl.id AS plan_id,
+            ipl.installments_count,
+            ipl.paid_count,
+            ipl.status AS plan_status,
+            ipl.total_amount AS plan_total,
+            (
+                SELECT COALESCE(SUM(ip.amount), 0)
+                FROM installment_payments ip
+                WHERE ip.plan_id = ipl.id AND ip.status = 'paid'
+            ) AS installment_paid_sum,
+            (
+                SELECT MIN(ip.due_date)
+                FROM installment_payments ip
+                WHERE ip.plan_id = ipl.id AND ip.status = 'pending'
+            ) AS next_due_date
+        FROM purchases p
+        JOIN users u ON u.id = p.user_id
         JOIN courses c ON c.id = p.course_id
+        LEFT JOIN coupons coup ON coup.id = p.coupon_id
+        LEFT JOIN installment_plans ipl ON ipl.purchase_id = p.id
         WHERE p.course_id = $1 AND p.status = 'approved'
-        ORDER BY u.id, p.approved_at DESC
+        ORDER BY p.approved_at DESC
         """
         return await self.execute(sql, course_id, fetch=True)
 
@@ -941,9 +964,12 @@ class Database:
         SELECT
             u.full_name, u.first_name, u.last_name, u.username, u.telegram_id, u.phone,
             c.name AS course_name,
+            COALESCE(p.original_amount, c.price, p.amount) AS course_original_price,
             p.id AS purchase_id,
-            p.amount,
+            p.amount AS discounted_amount,
+            p.coupon_discount,
             p.purchase_type,
+            p.is_installment,
             p.status,
             p.approved_at AS purchase_date,
             p.created_at AS order_date,
@@ -951,12 +977,32 @@ class Database:
             p.admin_note,
             p.invite_link,
             p.click_order_id,
-            CASE WHEN p.receipt_file_id IS NOT NULL THEN 'Ha' ELSE 'Yo''q' END AS has_receipt
+            CASE WHEN p.receipt_file_id IS NOT NULL THEN 'Ha' ELSE 'Yo''q' END AS has_receipt,
+            coup.code AS coupon_code,
+            coup.name AS coupon_name,
+            coup.discount_percent AS coupon_percent,
+            ipl.id AS plan_id,
+            ipl.installments_count,
+            ipl.paid_count,
+            ipl.status AS plan_status,
+            ipl.total_amount AS plan_total,
+            (
+                SELECT COALESCE(SUM(ip.amount), 0)
+                FROM installment_payments ip
+                WHERE ip.plan_id = ipl.id AND ip.status = 'paid'
+            ) AS installment_paid_sum,
+            (
+                SELECT MIN(ip.due_date)
+                FROM installment_payments ip
+                WHERE ip.plan_id = ipl.id AND ip.status = 'pending'
+            ) AS next_due_date
         FROM purchases p
         JOIN users u ON u.id = p.user_id
         JOIN courses c ON c.id = p.course_id
+        LEFT JOIN coupons coup ON coup.id = p.coupon_id
+        LEFT JOIN installment_plans ipl ON ipl.purchase_id = p.id
         WHERE p.status = 'approved'
-        ORDER BY u.id ASC, p.approved_at DESC
+        ORDER BY p.approved_at DESC
         """
         return await self.execute(sql, fetch=True)
 
