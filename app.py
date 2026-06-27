@@ -50,10 +50,22 @@ async def start_payment_server() -> None:
     logger.info("Payment server started on port %s", BOT_PAYMENT_SERVER_PORT)
 
 
+def _validate_config() -> None:
+    from data.config import BOT_PAYMENT_SERVER_SECRET, COURSE_INTEGRATION_KEY
+    if not BOT_PAYMENT_SERVER_SECRET:
+        logger.warning(
+            "OGOHLANTIRISH: BOT_PAYMENT_SERVER_SECRET o'rnatilmagan! "
+            "Webhook endpoint autentifikatsiyasiz ishlaydi."
+        )
+    if not COURSE_INTEGRATION_KEY:
+        logger.warning("OGOHLANTIRISH: COURSE_INTEGRATION_KEY o'rnatilmagan!")
+
+
 async def aiogram_on_startup_polling(dispatcher: Dispatcher, bot: Bot) -> None:
     from utils.set_bot_commands import set_default_commands
     from utils.notify_admins import on_startup_notify
 
+    _validate_config()
     logger.info("Database connected")
     await database_connected()
 

@@ -53,12 +53,15 @@ async def _notify_installment_approved(detail) -> None:
     plan_total = detail.get("plan_total", 0)
     paid_amount = detail.get("amount", 0)
     total_count = detail.get("installments_count", 1)
-    paid_count = detail.get("paid_count", 0)  # already incremented inside approve_installment_payment
+    paid_count = detail.get("paid_count", 0)
+
+    # To'g'ri formula: DB dan hisoblangan yig'indi orqali qolgan qarz
+    paid_sum = detail.get("paid_sum", 0)
+    remaining = max(plan_total - paid_sum, 0)
 
     if is_first:
         purchase = await db.select_purchase_by_id(detail["purchase_id"])
         access_link = (purchase or {}).get("invite_link") or detail.get("course_telegram_link")
-        remaining = plan_total - paid_amount
         text = (
             "✅ <b>Birinchi to'lov tasdiqlandi!</b>\n\n"
             f"📚 Kurs: <b>{html.quote(detail['course_name'])}</b>\n"
@@ -86,12 +89,11 @@ async def _notify_installment_approved(detail) -> None:
                 "Kurs uchun to'lov to'liq amalga oshirildi. Rahmat!"
             )
         else:
-            remaining = plan_total - paid_amount * detail["payment_number"]
             text = (
                 f"✅ <b>{detail['payment_number']}/{total_count}-to'lov tasdiqlandi!</b>\n\n"
                 f"📚 Kurs: <b>{html.quote(detail['course_name'])}</b>\n"
                 f"💰 To'langan: <b>{_fmt(paid_amount)}</b>\n"
-                f"💳 Qolgan qarz: <b>{_fmt(max(remaining, 0))}</b>\n\n"
+                f"💳 Qolgan qarz: <b>{_fmt(remaining)}</b>\n\n"
                 "Keyingi to'lov sanasi yaqinlashganda xabar yuboriladi.\n"
                 "\"Mening sotib olganlarim\" bo'limidan keyingi to'lovni amalga oshiring."
             )
@@ -104,8 +106,9 @@ async def _notify_installment_approved(detail) -> None:
 
 
 async def handle_purchase_confirm(request: web.Request) -> web.Response:
+    # Webhook autentifikatsiyasi — har doim tekshirish (shartli emas)
     secret = request.headers.get("X-Bot-Secret", "")
-    if BOT_PAYMENT_SERVER_SECRET and secret != BOT_PAYMENT_SERVER_SECRET:
+    if secret != BOT_PAYMENT_SERVER_SECRET:
         logger.warning("Purchase confirm: noto'g'ri secret | ip=%s", request.remote)
         return web.json_response({"error": "Unauthorized"}, status=403)
 
@@ -122,7 +125,14 @@ async def handle_purchase_confirm(request: web.Request) -> web.Response:
 
     click_order_id = int(click_order_id)
 
-    # 1. Try regular purchase
+    # Idempotentlik tekshiruvi — takroriy webhookni e'tiborsiz qoldirish
+    event_key = f"click:{click_order_id}"
+    is_new = await db.try_claim_webhook_event(event_key, data)
+    if not is_new:
+        logger.info("Takroriy webhook e'tiborsiz qoldirildi: %s", event_key)
+        return web.json_response({"success": True, "note": "already_processed"})
+
+    # 1. Oddiy to'lovni tekshirish
     try:
         purchase = await db.approve_click_purchase(
             click_order_id=click_order_id,
@@ -137,7 +147,7 @@ async def handle_purchase_confirm(request: web.Request) -> web.Response:
         await _notify_regular_approved(purchase)
         return web.json_response({"success": True, "purchase_id": purchase["id"]})
 
-    # 2. Try installment payment
+    # 2. Bo'lib to'lash to'lovini tekshirish
     try:
         detail = await db.approve_installment_by_click(
             click_order_id=click_order_id,

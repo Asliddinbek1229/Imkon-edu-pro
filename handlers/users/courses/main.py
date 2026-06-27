@@ -850,9 +850,7 @@ async def buy_pay_full(call: types.CallbackQuery, callback_data: BuyFlowCallback
         is_installment=False,
         click_order_id=result["order_id"],
     )
-    if coupon_id:
-        await db.increment_coupon_uses(coupon_id)
-
+    # Kupon hisoblash webhook tasdiqlashida amalga oshiriladi (approve_click_purchase ichida)
     await state.clear()
 
     markup = InlineKeyboardMarkup(inline_keyboard=[
@@ -905,9 +903,7 @@ async def buy_pay_installment(call: types.CallbackQuery, callback_data: BuyFlowC
         await call.answer("Xatolik. Qayta urinib ko'ring.", show_alert=True)
         return
 
-    if coupon_id:
-        await db.increment_coupon_uses(coupon_id)
-
+    # Kupon hisoblash 1-to'lov webhook tasdiqlashida amalga oshiriladi (approve_installment_by_click ichida)
     plan = await db.create_installment_plan(purchase["id"], discounted, count)
     first_payment = await db.get_next_pending_installment(plan["id"])
 

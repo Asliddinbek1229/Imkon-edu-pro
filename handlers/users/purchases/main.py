@@ -414,7 +414,7 @@ async def my_purchase_retry(call: types.CallbackQuery, callback_data: MyPurchase
         tg_id=call.from_user.id,
         course_id=course["id"],
         course_name=course["name"],
-        course_link=course["telegram_link"] or "",
+        course_link="",
         amount=course["price"],
     )
     if not result or not result.get("payment_url"):

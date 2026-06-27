@@ -59,6 +59,8 @@ class Database:
         await self.create_table_support_messages()
         await self.create_table_installment_plans()
         await self.create_table_installment_payments()
+        await self.create_table_webhook_events()
+        await self.ensure_db_indexes()
 
     async def create_table_users(self):
         # Users jadvali
@@ -597,18 +599,33 @@ class Database:
         return await self.select_purchase_by_id(purchase_id)
 
     async def approve_click_purchase(self, click_order_id: int, invite_link: str | None):
-        sql = """
-        UPDATE purchases
-        SET status = 'approved',
-            invite_link = COALESCE($2, invite_link),
-            approved_at = NOW(),
-            updated_at = NOW()
-        WHERE click_order_id = $1 AND status = 'pending'
-        RETURNING id;
-        """
-        purchase_id = await self.execute(sql, click_order_id, invite_link or None, fetchval=True)
-        if not purchase_id:
-            return None
+        """To'lov tasdiqlash + kupon hisobini oshirish — bitta atomik tranzaksiyada."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                purchase_id = await conn.fetchval(
+                    """
+                    UPDATE purchases
+                    SET status = 'approved',
+                        invite_link = COALESCE($2, invite_link),
+                        approved_at = NOW(),
+                        updated_at = NOW()
+                    WHERE click_order_id = $1 AND status = 'pending'
+                    RETURNING id;
+                    """,
+                    click_order_id, invite_link or None,
+                )
+                if not purchase_id:
+                    return None
+                # Kupon hisobini faqat to'lov tasdiqlanganda oshirish
+                coupon_id = await conn.fetchval(
+                    "SELECT coupon_id FROM purchases WHERE id = $1",
+                    purchase_id,
+                )
+                if coupon_id:
+                    await conn.execute(
+                        "UPDATE coupons SET uses_count = uses_count + 1 WHERE id = $1",
+                        coupon_id,
+                    )
         return await self.select_purchase_by_id(purchase_id)
 
     async def get_pending_click_purchases(self, telegram_id: int) -> list:
@@ -808,11 +825,30 @@ class Database:
         user = await self.select_user(telegram_id=telegram_id)
         if not user:
             return
-        await self.execute(
-            "UPDATE purchases SET status='rejected', rejected_at=NOW(), updated_at=NOW() "
-            "WHERE user_id=$1 AND course_id=$2 AND status='pending' AND purchase_type='paid';",
-            user["id"], course_id, execute=True,
-        )
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                # Bo'lib to'lash click_order_id larini tozalash —
+                # webhook eski buyurtmani tasdiqlashini oldini olish uchun
+                await conn.execute(
+                    """
+                    UPDATE installment_payments
+                    SET click_order_id = NULL
+                    WHERE plan_id IN (
+                        SELECT ipl.id
+                        FROM installment_plans ipl
+                        JOIN purchases p ON p.id = ipl.purchase_id
+                        WHERE p.user_id = $1
+                          AND p.course_id = $2
+                          AND p.status = 'pending'
+                    );
+                    """,
+                    user["id"], course_id,
+                )
+                await conn.execute(
+                    "UPDATE purchases SET status='rejected', rejected_at=NOW(), updated_at=NOW() "
+                    "WHERE user_id=$1 AND course_id=$2 AND status='pending' AND purchase_type='paid';",
+                    user["id"], course_id,
+                )
 
     async def select_user_purchase(self, telegram_id: int, purchase_id: int):
         sql = """
@@ -1152,7 +1188,10 @@ class Database:
             u.first_name,
             u.username,
             u.telegram_id,
-            u.phone
+            u.phone,
+            (SELECT COALESCE(SUM(amount), 0)
+             FROM installment_payments
+             WHERE plan_id = ip.plan_id AND status = 'paid') AS paid_sum
         FROM installment_payments ip
         JOIN installment_plans ipl ON ipl.id = ip.plan_id
         JOIN purchases p ON p.id = ipl.purchase_id
@@ -1179,63 +1218,125 @@ class Database:
     async def approve_installment_by_click(
         self, click_order_id: int, invite_link: str | None
     ) -> dict | None:
-        sql = """
-        SELECT ip.*,
-               ipl.purchase_id, ipl.installments_count, ipl.paid_count, ipl.total_amount AS plan_total,
-               p.course_id, p.is_installment,
-               c.telegram_link AS course_telegram_link
-        FROM installment_payments ip
-        JOIN installment_plans ipl ON ipl.id = ip.plan_id
-        JOIN purchases p ON p.id = ipl.purchase_id
-        JOIN courses c ON c.id = p.course_id
-        WHERE ip.click_order_id = $1 AND ip.status = 'pending'
-        LIMIT 1;
-        """
-        row = await self.execute(sql, click_order_id, fetchrow=True)
-        if not row:
-            return None
+        """CLICK webhook — barcha o'zgarishlar bitta atomik tranzaksiyada."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    SELECT ip.id, ip.payment_number, ip.plan_id,
+                           ipl.purchase_id, ipl.installments_count,
+                           p.coupon_id,
+                           c.telegram_link AS course_telegram_link
+                    FROM installment_payments ip
+                    JOIN installment_plans ipl ON ipl.id = ip.plan_id
+                    JOIN purchases p ON p.id = ipl.purchase_id
+                    JOIN courses c ON c.id = p.course_id
+                    WHERE ip.click_order_id = $1 AND ip.status = 'pending'
+                    LIMIT 1;
+                    """,
+                    click_order_id,
+                )
+                if not row:
+                    return None
 
-        updated = await self.approve_installment_payment(row["id"], 0)
-        if not updated:
-            return None
+                # 1. To'lovni to'langan deb belgilash
+                await conn.execute(
+                    """
+                    UPDATE installment_payments
+                    SET status = 'paid', paid_at = NOW(), approved_by = 0, admin_note = 'Tasdiqlandi.'
+                    WHERE id = $1;
+                    """,
+                    row["id"],
+                )
 
-        if row["payment_number"] == 1:
-            link = invite_link or row["course_telegram_link"]
-            await self.execute(
-                """
-                UPDATE purchases SET status='approved', invite_link=COALESCE($2, invite_link),
-                    approved_at=NOW(), updated_at=NOW()
-                WHERE id=$1 AND status='pending';
-                """,
-                row["purchase_id"], link, execute=True,
-            )
-        return updated
+                # 2. paid_count ni oshirish
+                new_paid = await conn.fetchval(
+                    "UPDATE installment_plans SET paid_count = paid_count + 1 WHERE id = $1 RETURNING paid_count;",
+                    row["plan_id"],
+                )
+
+                # 3. Agar barcha to'lovlar to'langan — plan yakunlandi
+                if new_paid and new_paid >= row["installments_count"]:
+                    await conn.execute(
+                        "UPDATE installment_plans SET status = 'completed' WHERE id = $1;",
+                        row["plan_id"],
+                    )
+
+                # 4. 1-to'lov bo'lsa — purchase ni tasdiqlash + kupon hisoblash
+                if row["payment_number"] == 1:
+                    link = invite_link or row["course_telegram_link"]
+                    await conn.execute(
+                        """
+                        UPDATE purchases
+                        SET status='approved', invite_link=COALESCE($2, invite_link),
+                            approved_at=NOW(), updated_at=NOW()
+                        WHERE id=$1 AND status='pending';
+                        """,
+                        row["purchase_id"], link,
+                    )
+                    # Kupon hisobini faqat birinchi to'lov tasdiqlanganda oshirish
+                    if row.get("coupon_id"):
+                        await conn.execute(
+                            "UPDATE coupons SET uses_count = uses_count + 1 WHERE id = $1",
+                            row["coupon_id"],
+                        )
+
+        return await self.get_installment_payment_detail(row["id"])
 
     async def approve_installment_payment(
         self, installment_payment_id: int, approved_by: int, note: str = ""
     ) -> dict | None:
-        await self.execute(
-            """
-            UPDATE installment_payments
-            SET status = 'paid', paid_at = NOW(), approved_by = $2, admin_note = $3
-            WHERE id = $1;
-            """,
-            installment_payment_id, approved_by, note or "Tasdiqlandi.", execute=True,
-        )
-        detail = await self.get_installment_payment_detail(installment_payment_id)
-        if not detail:
-            return None
+        """Admin qo'lda tasdiqlash — barcha o'zgarishlar bitta atomik tranzaksiyada."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                # To'lov va plan ma'lumotlarini olish
+                row = await conn.fetchrow(
+                    """
+                    SELECT ip.id, ip.payment_number, ip.plan_id,
+                           ipl.installments_count, ipl.purchase_id
+                    FROM installment_payments ip
+                    JOIN installment_plans ipl ON ipl.id = ip.plan_id
+                    WHERE ip.id = $1;
+                    """,
+                    installment_payment_id,
+                )
+                if not row:
+                    return None
 
-        plan_id = detail["plan_id"]
-        new_paid = await self.execute(
-            "UPDATE installment_plans SET paid_count = paid_count + 1 WHERE id = $1 RETURNING paid_count;",
-            plan_id, fetchval=True,
-        )
-        if new_paid and new_paid >= detail["installments_count"]:
-            await self.execute(
-                "UPDATE installment_plans SET status = 'completed' WHERE id = $1;",
-                plan_id, execute=True,
-            )
+                # 1. To'lovni to'langan deb belgilash
+                await conn.execute(
+                    """
+                    UPDATE installment_payments
+                    SET status = 'paid', paid_at = NOW(), approved_by = $2, admin_note = $3
+                    WHERE id = $1;
+                    """,
+                    installment_payment_id, approved_by, note or "Tasdiqlandi.",
+                )
+
+                # 2. paid_count ni oshirish
+                new_paid = await conn.fetchval(
+                    "UPDATE installment_plans SET paid_count = paid_count + 1 WHERE id = $1 RETURNING paid_count;",
+                    row["plan_id"],
+                )
+
+                # 3. Agar barcha to'lovlar to'langan — plan yakunlandi
+                if new_paid and new_paid >= row["installments_count"]:
+                    await conn.execute(
+                        "UPDATE installment_plans SET status = 'completed' WHERE id = $1;",
+                        row["plan_id"],
+                    )
+
+                # 4. Admin 1-to'lovni tasdiqlaganida purchases ni ham approve qilish
+                if row["payment_number"] == 1:
+                    await conn.execute(
+                        """
+                        UPDATE purchases
+                        SET status='approved', approved_by=$2, approved_at=NOW(), updated_at=NOW()
+                        WHERE id=$1 AND status='pending';
+                        """,
+                        row["purchase_id"], approved_by,
+                    )
+
         return await self.get_installment_payment_detail(installment_payment_id)
 
     async def get_upcoming_due_installments(self) -> list:
@@ -1289,6 +1390,57 @@ class Database:
     async def set_course_installment(self, course_id: int, enabled: bool) -> dict | None:
         sql = "UPDATE courses SET installment_available = $1 WHERE id = $2 RETURNING *;"
         return await self.execute(sql, enabled, course_id, fetchrow=True)
+
+    # ─── Webhook idempotentlik jadvali ───────────────────────────────────────
+
+    async def create_table_webhook_events(self) -> None:
+        await self.execute("""
+            CREATE TABLE IF NOT EXISTS webhook_events (
+                id           BIGSERIAL PRIMARY KEY,
+                event_key    VARCHAR(255) UNIQUE NOT NULL,
+                source       VARCHAR(50) NOT NULL DEFAULT 'click',
+                payload      JSONB NOT NULL DEFAULT '{}',
+                processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                result       JSONB,
+                error        TEXT
+            );
+        """, execute=True)
+
+    async def try_claim_webhook_event(self, event_key: str, payload: dict) -> bool:
+        """True qaytaradi — yangi event. False — takroriy (allaqachon qayta ishlangan)."""
+        import json
+        row = await self.execute(
+            """
+            INSERT INTO webhook_events (event_key, payload)
+            VALUES ($1, $2::jsonb)
+            ON CONFLICT (event_key) DO NOTHING
+            RETURNING id;
+            """,
+            event_key, json.dumps(payload), fetchval=True,
+        )
+        return row is not None
+
+    # ─── DB indekslari ────────────────────────────────────────────────────────
+
+    async def ensure_db_indexes(self) -> None:
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_purchases_click_order_id "
+            "ON purchases(click_order_id) WHERE click_order_id IS NOT NULL;",
+
+            "CREATE INDEX IF NOT EXISTS idx_purchases_user_course_status "
+            "ON purchases(user_id, course_id, status);",
+
+            "CREATE INDEX IF NOT EXISTS idx_installment_payments_click_order "
+            "ON installment_payments(click_order_id) WHERE click_order_id IS NOT NULL;",
+
+            "CREATE INDEX IF NOT EXISTS idx_installment_payments_due_pending "
+            "ON installment_payments(due_date, status) WHERE status = 'pending';",
+
+            "CREATE INDEX IF NOT EXISTS idx_webhook_events_key "
+            "ON webhook_events(event_key);",
+        ]
+        for sql in indexes:
+            await self.execute(sql, execute=True)
 
     async def delete_users(self):
         # Barcha foydalanuvchilarni o'chirish
