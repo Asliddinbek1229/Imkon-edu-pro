@@ -283,7 +283,7 @@ async def render_course_detail(call: types.CallbackQuery, course_id: int, page: 
     if course["price"] > 0:
         user = await db.select_user(telegram_id=call.from_user.id)
         if user:
-            approved = await db.select_active_purchase_for_course(user["id"], course["id"])
+            approved = await db.select_active_purchase_for_course(user["id"], course["id"], purchase_type="paid")
             if approved and approved["status"] == "approved":
                 has_approved = True
             elif not approved:
