@@ -706,6 +706,25 @@ async def buy_coupon_code_input(message: types.Message, state: FSMContext):
         )
         return
 
+    if coupon.get("course_id") and coupon["course_id"] != course_id:
+        await bot.edit_message_text(
+            chat_id=chat_id, message_id=msg_id,
+            text="❌ <b>Bu kupon ushbu kurs uchun mo'ljallanmagan.</b>\n\nBoshqa kupon kiriting yoki kuponsiz davom eting:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="⏭️ Kuponsiz",
+                    callback_data=BuyFlowCallback(action="coupon_skip", course_id=course_id, page=page).pack(),
+                    style=ButtonStyle.SUCCESS,
+                ),
+                InlineKeyboardButton(
+                    text="❌ Bekor",
+                    callback_data=BuyFlowCallback(action="cancel", course_id=course_id, page=page).pack(),
+                    style=ButtonStyle.DANGER,
+                ),
+            ]]),
+        )
+        return
+
     if coupon["discount_percent"]:
         discount = int(original_price * coupon["discount_percent"] / 100)
     else:

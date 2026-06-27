@@ -112,6 +112,15 @@ class AdminCouponCallback(CallbackData, prefix="adcoup"):
     page: int = 1
 
 
+class AdminCouponCourseCallback(CallbackData, prefix="adcoupcourse"):
+    course_id: int  # 0 = barcha kurslar uchun
+
+
+class AdminCouponEditCallback(CallbackData, prefix="adcoupedit"):
+    field: str  # code | name | discount | max_uses | expires | course
+    coupon_id: int
+
+
 class AdminInstallmentCallback(CallbackData, prefix="adinst"):
     action: str  # list
     page: int = 1
@@ -2448,7 +2457,7 @@ def _coupon_list_keyboard(coupons: list) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _coupon_detail_text(c) -> str:
+def _coupon_detail_text(c, course_name: str | None = None) -> str:
     active = "✅ Faol" if c["is_active"] else "🚫 Faol emas"
     if c["discount_percent"]:
         discount_str = f"{c['discount_percent']}% chegirma"
@@ -2461,7 +2470,11 @@ def _coupon_detail_text(c) -> str:
     else:
         uses = f"{c['uses_count']} (cheksiz)"
     expires = c["expires_at"].strftime("%d.%m.%Y %H:%M") if c.get("expires_at") else "muddatsiz"
-    course_line = f"Kurs: kurs #{c['course_id']}" if c.get("course_id") else "Kurs: barcha kurslar"
+    if c.get("course_id"):
+        name_display = html.quote(course_name) if course_name else f"#{c['course_id']}"
+        course_line = f"Kurs: <b>{name_display}</b>"
+    else:
+        course_line = "Kurs: <b>barcha kurslar uchun</b>"
     return (
         f"🎟 <b>KUPON: <code>{html.quote(c['code'])}</code></b>\n\n"
         f"Nomi: <b>{html.quote(c['name'])}</b>\n"
@@ -2473,19 +2486,47 @@ def _coupon_detail_text(c) -> str:
     )
 
 
+def _coupon_course_keyboard(courses: list) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for course in courses:
+        rows.append([InlineKeyboardButton(
+            text=f"📘 {html.quote(course['name'])}",
+            callback_data=AdminCouponCourseCallback(course_id=course["id"]).pack(),
+            style=ButtonStyle.PRIMARY,
+        )])
+    rows.append([InlineKeyboardButton(
+        text="🌐 Barcha kurslar uchun",
+        callback_data=AdminCouponCourseCallback(course_id=0).pack(),
+        style=ButtonStyle.SUCCESS,
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _coupon_detail_keyboard(c) -> InlineKeyboardMarkup:
+    cid = c["id"]
     toggle_text = "🚫 O'chirish" if c["is_active"] else "✅ Yoqish"
     toggle_style = ButtonStyle.DANGER if c["is_active"] else ButtonStyle.SUCCESS
+
+    def edit_btn(label: str, field: str) -> InlineKeyboardButton:
+        return InlineKeyboardButton(
+            text=label,
+            callback_data=AdminCouponEditCallback(field=field, coupon_id=cid).pack(),
+            style=ButtonStyle.PRIMARY,
+        )
+
     return InlineKeyboardMarkup(inline_keyboard=[
+        [edit_btn("✏️ Kod", "code"), edit_btn("✏️ Nomi", "name")],
+        [edit_btn("💰 Chegirma", "discount"), edit_btn("📊 Limit", "max_uses")],
+        [edit_btn("📅 Muddat", "expires"), edit_btn("📚 Kurs", "course")],
         [
             InlineKeyboardButton(
                 text=toggle_text,
-                callback_data=AdminCouponCallback(action="toggle", coupon_id=c["id"]).pack(),
+                callback_data=AdminCouponCallback(action="toggle", coupon_id=cid).pack(),
                 style=toggle_style,
             ),
             InlineKeyboardButton(
                 text="🗑 O'chirish",
-                callback_data=AdminCouponCallback(action="delete", coupon_id=c["id"]).pack(),
+                callback_data=AdminCouponCallback(action="delete", coupon_id=cid).pack(),
                 style=ButtonStyle.DANGER,
             ),
         ],
@@ -2520,7 +2561,11 @@ async def admin_coupon_view(call: types.CallbackQuery, callback_data: AdminCoupo
         await call.answer("Kupon topilmadi.", show_alert=True)
         return
     await call.answer()
-    await call.message.edit_text(_coupon_detail_text(c), reply_markup=_coupon_detail_keyboard(c))
+    course_name = None
+    if c.get("course_id"):
+        course = await db.select_course(c["course_id"])
+        course_name = course["name"] if course else None
+    await call.message.edit_text(_coupon_detail_text(c, course_name), reply_markup=_coupon_detail_keyboard(c))
 
 
 @router.callback_query(AdminCouponCallback.filter(F.action == "toggle"), IsBotAdminFilter(ADMINS))
@@ -2531,7 +2576,11 @@ async def admin_coupon_toggle(call: types.CallbackQuery, callback_data: AdminCou
         return
     status = "yoqildi" if c["is_active"] else "o'chirildi"
     await call.answer(f"Kupon {status}.")
-    await call.message.edit_text(_coupon_detail_text(c), reply_markup=_coupon_detail_keyboard(c))
+    course_name = None
+    if c.get("course_id"):
+        course = await db.select_course(c["course_id"])
+        course_name = course["name"] if course else None
+    await call.message.edit_text(_coupon_detail_text(c, course_name), reply_markup=_coupon_detail_keyboard(c))
 
 
 @router.callback_query(AdminCouponCallback.filter(F.action == "delete"), IsBotAdminFilter(ADMINS))
@@ -2541,6 +2590,247 @@ async def admin_coupon_delete(call: types.CallbackQuery, callback_data: AdminCou
     coupons = await db.list_coupons()
     text = _coupon_list_text(coupons)
     markup = _coupon_list_keyboard(coupons)
+    await call.message.edit_text(text, reply_markup=markup)
+
+
+# ── COUPON EDIT ───────────────────────────────────────────────────────────────
+
+async def _render_coupon(coupon_id: int) -> tuple[str | None, object]:
+    c = await db.get_coupon(coupon_id)
+    if not c:
+        return None, None
+    course_name = None
+    if c.get("course_id"):
+        course = await db.select_course(c["course_id"])
+        course_name = course["name"] if course else None
+    return _coupon_detail_text(c, course_name), _coupon_detail_keyboard(c)
+
+
+@router.callback_query(AdminCouponEditCallback.filter(), IsBotAdminFilter(ADMINS))
+async def admin_coupon_edit_start(
+    call: types.CallbackQuery,
+    callback_data: AdminCouponEditCallback,
+    state: FSMContext,
+):
+    await state.clear()
+    coupon_id = callback_data.coupon_id
+    field = callback_data.field
+    c = await db.get_coupon(coupon_id)
+    if not c:
+        await call.answer("Kupon topilmadi.", show_alert=True)
+        return
+    await call.answer()
+    await state.update_data(editing_coupon_id=coupon_id)
+
+    cancel_markup = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="❌ Bekor",
+            callback_data=AdminCouponCallback(action="view", coupon_id=coupon_id).pack(),
+            style=ButtonStyle.DANGER,
+        )
+    ]])
+
+    if field == "code":
+        await state.set_state(AdminCouponState.edit_code)
+        await call.message.edit_text(
+            f"✏️ <b>Yangi kupon kodi</b>\n\nHozirgi: <code>{html.quote(c['code'])}</code>\n\nYangi kod kiriting:",
+            reply_markup=cancel_markup,
+        )
+    elif field == "name":
+        await state.set_state(AdminCouponState.edit_name)
+        await call.message.edit_text(
+            f"✏️ <b>Yangi nom</b>\n\nHozirgi: <b>{html.quote(c['name'])}</b>\n\nYangi nom kiriting:",
+            reply_markup=cancel_markup,
+        )
+    elif field == "discount":
+        await state.set_state(AdminCouponState.edit_discount)
+        cur = f"{c['discount_percent']}%" if c["discount_percent"] else format_price(c["discount_amount"])
+        await call.message.edit_text(
+            f"💰 <b>Yangi chegirma</b>\n\nHozirgi: <b>{cur}</b>\n\n"
+            "Foiz uchun: <code>20%</code>\nSo'm uchun: <code>200000</code>",
+            reply_markup=cancel_markup,
+        )
+    elif field == "max_uses":
+        await state.set_state(AdminCouponState.edit_max_uses)
+        cur = str(c["max_uses"]) if c["max_uses"] else "cheksiz"
+        await call.message.edit_text(
+            f"📊 <b>Yangi foydalanish limiti</b>\n\nHozirgi: <b>{cur}</b>\n\n"
+            "Son kiriting yoki cheksiz uchun: <code>skip</code>",
+            reply_markup=cancel_markup,
+        )
+    elif field == "expires":
+        await state.set_state(AdminCouponState.edit_expires)
+        cur = c["expires_at"].strftime("%d.%m.%Y") if c.get("expires_at") else "muddatsiz"
+        await call.message.edit_text(
+            f"📅 <b>Yangi muddat</b>\n\nHozirgi: <b>{cur}</b>\n\n"
+            "Sana kiriting: <code>31.12.2025</code>\nMuddatsiz: <code>skip</code>",
+            reply_markup=cancel_markup,
+        )
+    elif field == "course":
+        await state.set_state(AdminCouponState.edit_course)
+        courses = await db.select_courses_page(limit=50, offset=0)
+        await call.message.edit_text(
+            "📚 <b>Yangi kurs</b>\n\nQaysi kurs uchun ishlashini tanlang:",
+            reply_markup=_coupon_course_keyboard(courses),
+        )
+
+
+@router.message(StateFilter(AdminCouponState.edit_code), IsBotAdminFilter(ADMINS))
+async def admin_coupon_edit_code(message: types.Message, state: FSMContext):
+    code = (message.text or "").strip().upper()
+    if not code or not all(ch.isalnum() or ch in "_-" for ch in code):
+        await message.answer("❌ Noto'g'ri format. Faqat lotin harflari, raqamlar, '-' va '_'.")
+        return
+    data = await state.get_data()
+    coupon_id = data["editing_coupon_id"]
+    existing = await db.get_coupon_by_code(code)
+    if existing and existing["id"] != coupon_id:
+        await message.answer(f"❌ <code>{html.quote(code)}</code> kodi allaqachon mavjud.")
+        return
+    c = await db.get_coupon(coupon_id)
+    await db.update_coupon(
+        coupon_id=coupon_id, code=code, name=c["name"],
+        discount_percent=c["discount_percent"], discount_amount=c["discount_amount"],
+        max_uses=c["max_uses"], course_id=c.get("course_id"), expires_at=c.get("expires_at"),
+    )
+    await state.clear()
+    text, markup = await _render_coupon(coupon_id)
+    await message.answer(f"✅ Kod yangilandi: <code>{html.quote(code)}</code>")
+    await message.answer(text, reply_markup=markup)
+
+
+@router.message(StateFilter(AdminCouponState.edit_name), IsBotAdminFilter(ADMINS))
+async def admin_coupon_edit_name(message: types.Message, state: FSMContext):
+    name = (message.text or "").strip()
+    if not name:
+        await message.answer("❌ Nom bo'sh bo'lmasin.")
+        return
+    data = await state.get_data()
+    coupon_id = data["editing_coupon_id"]
+    c = await db.get_coupon(coupon_id)
+    await db.update_coupon(
+        coupon_id=coupon_id, code=c["code"], name=name,
+        discount_percent=c["discount_percent"], discount_amount=c["discount_amount"],
+        max_uses=c["max_uses"], course_id=c.get("course_id"), expires_at=c.get("expires_at"),
+    )
+    await state.clear()
+    text, markup = await _render_coupon(coupon_id)
+    await message.answer(f"✅ Nom yangilandi: <b>{html.quote(name)}</b>")
+    await message.answer(text, reply_markup=markup)
+
+
+@router.message(StateFilter(AdminCouponState.edit_discount), IsBotAdminFilter(ADMINS))
+async def admin_coupon_edit_discount(message: types.Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    discount_percent, discount_amount = 0, 0
+    if raw.endswith("%"):
+        try:
+            val = int(raw[:-1])
+            if not 1 <= val <= 99:
+                raise ValueError
+            discount_percent = val
+        except ValueError:
+            await message.answer("❌ Foiz 1–99 oralig'ida bo'lishi kerak.")
+            return
+    else:
+        try:
+            val = int(raw.replace(" ", "").replace(",", ""))
+            if val <= 0:
+                raise ValueError
+            discount_amount = val
+        except ValueError:
+            await message.answer("❌ Raqam kiriting. Misol: <code>200000</code> yoki <code>20%</code>")
+            return
+    data = await state.get_data()
+    coupon_id = data["editing_coupon_id"]
+    c = await db.get_coupon(coupon_id)
+    await db.update_coupon(
+        coupon_id=coupon_id, code=c["code"], name=c["name"],
+        discount_percent=discount_percent, discount_amount=discount_amount,
+        max_uses=c["max_uses"], course_id=c.get("course_id"), expires_at=c.get("expires_at"),
+    )
+    await state.clear()
+    text, markup = await _render_coupon(coupon_id)
+    disc_str = f"{discount_percent}%" if discount_percent else format_price(discount_amount)
+    await message.answer(f"✅ Chegirma yangilandi: <b>{disc_str}</b>")
+    await message.answer(text, reply_markup=markup)
+
+
+@router.message(StateFilter(AdminCouponState.edit_max_uses), IsBotAdminFilter(ADMINS))
+async def admin_coupon_edit_max_uses(message: types.Message, state: FSMContext):
+    raw = (message.text or "").strip().lower()
+    max_uses = None
+    if raw not in SKIP_TEXTS:
+        try:
+            max_uses = int(raw)
+            if max_uses <= 0:
+                raise ValueError
+        except ValueError:
+            await message.answer("❌ Musbat son kiriting yoki <code>skip</code> yozing.")
+            return
+    data = await state.get_data()
+    coupon_id = data["editing_coupon_id"]
+    c = await db.get_coupon(coupon_id)
+    await db.update_coupon(
+        coupon_id=coupon_id, code=c["code"], name=c["name"],
+        discount_percent=c["discount_percent"], discount_amount=c["discount_amount"],
+        max_uses=max_uses, course_id=c.get("course_id"), expires_at=c.get("expires_at"),
+    )
+    await state.clear()
+    text, markup = await _render_coupon(coupon_id)
+    uses_str = str(max_uses) if max_uses else "cheksiz"
+    await message.answer(f"✅ Limit yangilandi: <b>{uses_str}</b>")
+    await message.answer(text, reply_markup=markup)
+
+
+@router.message(StateFilter(AdminCouponState.edit_expires), IsBotAdminFilter(ADMINS))
+async def admin_coupon_edit_expires(message: types.Message, state: FSMContext):
+    from datetime import datetime, timezone
+    raw = (message.text or "").strip().lower()
+    expires_at = None
+    if raw not in SKIP_TEXTS:
+        try:
+            expires_at = datetime.strptime(raw, "%d.%m.%Y").replace(tzinfo=timezone.utc)
+        except ValueError:
+            await message.answer("❌ Format noto'g'ri. <code>31.12.2025</code> shaklida yozing yoki <code>skip</code>:")
+            return
+    data = await state.get_data()
+    coupon_id = data["editing_coupon_id"]
+    c = await db.get_coupon(coupon_id)
+    await db.update_coupon(
+        coupon_id=coupon_id, code=c["code"], name=c["name"],
+        discount_percent=c["discount_percent"], discount_amount=c["discount_amount"],
+        max_uses=c["max_uses"], course_id=c.get("course_id"), expires_at=expires_at,
+    )
+    await state.clear()
+    text, markup = await _render_coupon(coupon_id)
+    exp_str = expires_at.strftime("%d.%m.%Y") if expires_at else "muddatsiz"
+    await message.answer(f"✅ Muddat yangilandi: <b>{exp_str}</b>")
+    await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(AdminCouponCourseCallback.filter(), StateFilter(AdminCouponState.edit_course), IsBotAdminFilter(ADMINS))
+async def admin_coupon_edit_course(
+    call: types.CallbackQuery,
+    callback_data: AdminCouponCourseCallback,
+    state: FSMContext,
+):
+    course_id = callback_data.course_id if callback_data.course_id != 0 else None
+    data = await state.get_data()
+    coupon_id = data["editing_coupon_id"]
+    c = await db.get_coupon(coupon_id)
+    if not c:
+        await call.answer("Kupon topilmadi.", show_alert=True)
+        await state.clear()
+        return
+    await db.update_coupon(
+        coupon_id=coupon_id, code=c["code"], name=c["name"],
+        discount_percent=c["discount_percent"], discount_amount=c["discount_amount"],
+        max_uses=c["max_uses"], course_id=course_id, expires_at=c.get("expires_at"),
+    )
+    await state.clear()
+    text, markup = await _render_coupon(coupon_id)
+    await call.answer("✅ Kurs yangilandi!")
     await call.message.edit_text(text, reply_markup=markup)
 
 
@@ -2657,6 +2947,19 @@ async def admin_coupon_enter_expires(message: types.Message, state: FSMContext):
             await message.answer("❌ Format noto'g'ri. <code>31.12.2025</code> shaklida yozing yoki <code>skip</code>:")
             return
 
+    await state.update_data(coup_expires_at=expires_at)
+    await state.set_state(AdminCouponState.enter_course)
+
+    courses = await db.select_courses_page(limit=50, offset=0)
+    await message.answer(
+        "📚 <b>Kupon qaysi kurs uchun?</b>\n\nKursni tanlang yoki barcha kurslar uchun belgilang:",
+        reply_markup=_coupon_course_keyboard(courses),
+    )
+
+
+@router.callback_query(AdminCouponCourseCallback.filter(), StateFilter(AdminCouponState.enter_course), IsBotAdminFilter(ADMINS))
+async def admin_coupon_select_course(call: types.CallbackQuery, callback_data: AdminCouponCourseCallback, state: FSMContext):
+    course_id = callback_data.course_id if callback_data.course_id != 0 else None
     data = await state.get_data()
     await state.clear()
 
@@ -2666,14 +2969,21 @@ async def admin_coupon_enter_expires(message: types.Message, state: FSMContext):
         discount_percent=data.get("coup_discount_percent", 0),
         discount_amount=data.get("coup_discount_amount", 0),
         max_uses=data.get("coup_max_uses"),
-        course_id=None,
-        expires_at=expires_at,
+        course_id=course_id,
+        expires_at=data.get("coup_expires_at"),
     )
     if not coupon:
-        await message.answer("❌ Kupon yaratishda xatolik. Qayta urinib ko'ring.")
+        await call.answer("❌ Kupon yaratishda xatolik.", show_alert=True)
         return
-    await message.answer(
-        f"✅ <b>Kupon yaratildi!</b>\n\n{_coupon_detail_text(coupon)}",
+
+    course_name = None
+    if course_id:
+        course = await db.select_course(course_id)
+        course_name = course["name"] if course else None
+
+    await call.answer("✅ Kupon yaratildi!")
+    await call.message.edit_text(
+        f"✅ <b>Kupon yaratildi!</b>\n\n{_coupon_detail_text(coupon, course_name)}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(
                 text="🎟 Kuponlar ro'yxati",

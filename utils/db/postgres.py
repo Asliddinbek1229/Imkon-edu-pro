@@ -981,6 +981,29 @@ class Database:
         sql = "UPDATE coupons SET is_active = NOT is_active WHERE id = $1 RETURNING *;"
         return await self.execute(sql, coupon_id, fetchrow=True)
 
+    async def update_coupon(
+        self,
+        coupon_id: int,
+        code: str,
+        name: str,
+        discount_percent: int,
+        discount_amount: int,
+        max_uses: int | None,
+        course_id: int | None,
+        expires_at=None,
+    ) -> dict | None:
+        sql = """
+        UPDATE coupons
+        SET code=$2, name=$3, discount_percent=$4, discount_amount=$5,
+            max_uses=$6, course_id=$7, expires_at=$8
+        WHERE id=$1
+        RETURNING *;
+        """
+        return await self.execute(
+            sql, coupon_id, code.upper(), name, discount_percent,
+            discount_amount, max_uses, course_id, expires_at, fetchrow=True,
+        )
+
     async def delete_coupon(self, coupon_id: int) -> None:
         await self.execute("DELETE FROM coupons WHERE id = $1;", coupon_id, execute=True)
 
