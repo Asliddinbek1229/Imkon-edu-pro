@@ -181,19 +181,24 @@ def purchase_detail_text(purchase, plan=None, payments=None) -> str:
 
     installment_line = ""
     if plan and payments:
-        paid = sum(1 for p in payments if p["status"] == "paid")
-        total = plan["installments_count"]
+        paid_count = sum(1 for p in payments if p["status"] == "paid")
+        total_count = plan["installments_count"]
+        paid_amount = sum(p["amount"] for p in payments if p["status"] == "paid")
+        remaining_amount = plan["total_amount"] - paid_amount
+        remaining_str = format_price(remaining_amount) if remaining_amount > 0 else "✅ To'liq to'langan"
         installment_line = (
-            f"\n\n📅 <b>Muddatli to'lov: {paid}/{total}</b>\n"
-            f"Umumiy summa: <b>{format_price(plan['total_amount'])}</b>"
+            f"\n\n📅 <b>Muddatli to'lov: {paid_count}/{total_count}</b>\n"
+            f"Kurs narxi: <b>{format_price(plan['total_amount'])}</b>\n"
+            f"To'langan: <b>{format_price(paid_amount)}</b>\n"
+            f"Qolgan qarz: <b>{remaining_str}</b>"
         )
         pending_payments = [p for p in payments if p["status"] == "pending"]
         if pending_payments:
             nxt = pending_payments[0]
             due_str = nxt["due_date"].strftime("%d.%m.%Y") if nxt.get("due_date") else "—"
             installment_line += (
-                f"\nKeyingi to'lov: <b>{format_price(nxt['amount'])}</b> "
-                f"({nxt['payment_number']}/{total}) – {due_str}"
+                f"\n\nKeyingi to'lov: <b>{format_price(nxt['amount'])}</b> "
+                f"({nxt['payment_number']}/{total_count}) – {due_str}"
             )
 
     return (

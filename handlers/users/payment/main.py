@@ -6,7 +6,7 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from loader import db
-from utils.misc.api.course_payment import create_course_payment
+from utils.misc.api.course_payment import check_order_status, create_course_payment
 
 payment_router = Router()
 
@@ -33,12 +33,23 @@ async def pay_next_installment(
         return
 
     if next_payment.get("click_order_id"):
-        await call.answer(
-            "To'lov havolasi allaqachon yaratilgan. "
-            "Eski havola orqali to'lang yoki admin bilan bog'laning.",
-            show_alert=True,
-        )
-        return
+        order_data = await check_order_status(next_payment["click_order_id"])
+        if order_data and order_data.get("paid"):
+            updated = await db.approve_installment_by_click(
+                click_order_id=next_payment["click_order_id"],
+                invite_link=order_data.get("course_link") or None,
+            )
+            if updated:
+                from utils.misc.payment_server import _notify_installment_approved
+                await _notify_installment_approved(updated)
+            await call.answer("✅ To'lov tasdiqlandi!", show_alert=True)
+            return
+        # To'lov havolasi yaratilgan lekin to'lanmagan — yangi havola yaratamiz
+        await db.clear_installment_click_order(next_payment["id"])
+        next_payment = await db.get_next_pending_installment(callback_data.plan_id)
+        if not next_payment:
+            await call.answer("Barcha to'lovlar amalga oshirilgan!", show_alert=True)
+            return
 
     detail = await db.get_installment_payment_detail(next_payment["id"])
     if not detail:
@@ -52,7 +63,7 @@ async def pay_next_installment(
         tg_id=call.from_user.id,
         course_id=detail["course_id"],
         course_name=detail["course_name"],
-        course_link=course_link,
+        course_link="",
         amount=next_payment["amount"],
     )
 

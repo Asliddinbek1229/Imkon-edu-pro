@@ -10,6 +10,7 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
 
+from handlers.users.payment.main import NextInstallmentCallback
 from handlers.users.purchases.main import MyPurchaseDetailCallback, MyPurchasesPageCallback
 from loader import bot, db
 from states import CouponState
@@ -55,6 +56,26 @@ def fit_caption(text: str) -> str:
         return text
     suffix = "\n\n…\nTo'liq tavsif uchun admin bilan bog'laning."
     return text[: TELEGRAM_CAPTION_LIMIT - len(suffix)].rstrip() + suffix
+
+
+async def _get_installment_continuation(purchase_id: int) -> dict | None:
+    plan = await db.get_installment_plan_by_purchase(purchase_id)
+    if not plan:
+        return None
+    payments = await db.get_installment_payments(plan["id"])
+    pending = [p for p in payments if p["status"] == "pending"]
+    if not pending:
+        return None
+    nxt = pending[0]
+    return {
+        "plan_id": plan["id"],
+        "purchase_id": purchase_id,
+        "next_amount": nxt["amount"],
+        "payment_number": nxt["payment_number"],
+        "total_count": plan["installments_count"],
+        "due_date": nxt.get("due_date"),
+        "click_order_id": nxt.get("click_order_id"),
+    }
 
 
 def course_catalog_text(courses: list, page: int, total: int) -> str:
@@ -167,7 +188,13 @@ def course_detail_text(course) -> str:
     )
 
 
-def course_detail_keyboard(course, page: int, pending_purchase=None, has_approved=False) -> InlineKeyboardMarkup:
+def course_detail_keyboard(
+    course,
+    page: int,
+    pending_purchase=None,
+    has_approved=False,
+    installment_continuation: dict | None = None,
+) -> InlineKeyboardMarkup:
     course_id = course["id"]
     show_free = course["show_free_button"] and bool(course["free_telegram_link"])
     show_paid = course["show_paid_button"] and course["price"] > 0
@@ -184,22 +211,46 @@ def course_detail_keyboard(course, page: int, pending_purchase=None, has_approve
         ])
 
     if show_paid and not has_approved:
-        if pending_purchase:
-            paid_btn_text = "⚡ To'lovni davom ettirish"
-            btn_style = ButtonStyle.PRIMARY
+        if installment_continuation:
+            nxt_num = installment_continuation["payment_number"]
+            total = installment_continuation["total_count"]
+            nxt_amount = format_price(installment_continuation["next_amount"])
+            due = installment_continuation.get("due_date")
+            due_str = f" · {due.strftime('%d.%m.%Y')}" if due else ""
+            action_rows.append([
+                InlineKeyboardButton(
+                    text=f"⚡ {nxt_num}/{total}-to'lov: {nxt_amount}{due_str}",
+                    callback_data=NextInstallmentCallback(
+                        plan_id=installment_continuation["plan_id"],
+                        purchase_id=installment_continuation["purchase_id"],
+                    ).pack(),
+                    style=ButtonStyle.PRIMARY,
+                )
+            ])
+        elif pending_purchase:
+            action_rows.append([
+                InlineKeyboardButton(
+                    text="⚡ To'lovni davom ettirish",
+                    callback_data=CatalogActionCallback(action="buy", course_id=course_id, page=page).pack(),
+                    style=ButtonStyle.PRIMARY,
+                )
+            ])
         elif course["show_price"]:
-            paid_btn_text = f"💎 {format_price(course['price'])} | Sotib olish"
-            btn_style = ButtonStyle.SUCCESS
+            action_rows.append([
+                InlineKeyboardButton(
+                    text=f"💎 {format_price(course['price'])} | Sotib olish",
+                    callback_data=CatalogActionCallback(action="buy", course_id=course_id, page=page).pack(),
+                    style=ButtonStyle.SUCCESS,
+                )
+            ])
         else:
-            paid_btn_text = "💎 Sotib olish"
-            btn_style = ButtonStyle.SUCCESS
-        action_rows.append([
-            InlineKeyboardButton(
-                text=paid_btn_text,
-                callback_data=CatalogActionCallback(action="buy", course_id=course_id, page=page).pack(),
-                style=btn_style,
-            )
-        ])
+            action_rows.append([
+                InlineKeyboardButton(
+                    text="💎 Sotib olish",
+                    callback_data=CatalogActionCallback(action="buy", course_id=course_id, page=page).pack(),
+                    style=ButtonStyle.SUCCESS,
+                )
+            ])
 
     if not show_free and not show_paid and course["price"] <= 0:
         # Narxi 0, show_free_button o'chirilgan — eski bepul olish xatti-harakati
@@ -280,18 +331,34 @@ async def render_course_detail(call: types.CallbackQuery, course_id: int, page: 
 
     pending_purchase = None
     has_approved = False
+    installment_continuation = None
+
     if course["price"] > 0:
         user = await db.select_user(telegram_id=call.from_user.id)
         if user:
-            approved = await db.select_active_purchase_for_course(user["id"], course["id"], purchase_type="paid")
-            if approved and approved["status"] == "approved":
-                has_approved = True
-            elif not approved:
-                pending_purchase = await db.get_pending_course_purchase(call.from_user.id, course["id"])
-            elif approved and approved["status"] == "pending":
-                pending_purchase = approved
+            active = await db.select_active_purchase_for_course(user["id"], course["id"], purchase_type="paid")
+            if active is None:
+                pass  # Xarid yo'q — oddiy "Sotib olish" tugmasi
+            elif active["status"] == "approved":
+                if active.get("is_installment"):
+                    installment_continuation = await _get_installment_continuation(active["id"])
+                    if installment_continuation is None:
+                        has_approved = True  # Barcha bo'limlar to'langan
+                else:
+                    has_approved = True
+            elif active["status"] == "pending":
+                if active.get("is_installment"):
+                    installment_continuation = await _get_installment_continuation(active["id"])
+                else:
+                    pending_purchase = active
 
-    markup = course_detail_keyboard(course=course, page=page, pending_purchase=pending_purchase, has_approved=has_approved)
+    markup = course_detail_keyboard(
+        course=course,
+        page=page,
+        pending_purchase=pending_purchase,
+        has_approved=has_approved,
+        installment_continuation=installment_continuation,
+    )
     caption = fit_caption(text)
 
     if course.get("video_file_id"):
@@ -761,7 +828,7 @@ async def buy_pay_full(call: types.CallbackQuery, callback_data: BuyFlowCallback
         tg_id=call.from_user.id,
         course_id=course["id"],
         course_name=course["name"],
-        course_link=course["telegram_link"] or "",
+        course_link="",
         amount=discounted,
     )
 
@@ -848,7 +915,7 @@ async def buy_pay_installment(call: types.CallbackQuery, callback_data: BuyFlowC
         tg_id=call.from_user.id,
         course_id=course["id"],
         course_name=course["name"],
-        course_link=course.get("telegram_link") or "",
+        course_link="",
         amount=first_payment["amount"],
     )
 

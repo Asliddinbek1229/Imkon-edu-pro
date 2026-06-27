@@ -1170,6 +1170,12 @@ class Database:
             click_order_id, installment_payment_id, execute=True,
         )
 
+    async def clear_installment_click_order(self, installment_payment_id: int) -> None:
+        await self.execute(
+            "UPDATE installment_payments SET click_order_id = NULL WHERE id = $1;",
+            installment_payment_id, execute=True,
+        )
+
     async def approve_installment_by_click(
         self, click_order_id: int, invite_link: str | None
     ) -> dict | None:
