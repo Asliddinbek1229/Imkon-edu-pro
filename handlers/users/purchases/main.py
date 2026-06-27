@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from math import ceil
 
 from aiogram import F, Router, html, types
@@ -34,6 +34,11 @@ class MyPurchaseActionCallback(CallbackData, prefix="mypa"):
     page: int = 1
 
 
+class EarlyRepaymentCallback(CallbackData, prefix="earlyp"):
+    plan_id: int
+    purchase_id: int
+
+
 def format_price(price: int) -> str:
     if price <= 0:
         return "BEPUL"
@@ -46,6 +51,31 @@ def format_date(value) -> str:
     if isinstance(value, datetime):
         return value.strftime("%d.%m.%Y %H:%M")
     return str(value)
+
+
+def _fmt_date_short(value) -> str:
+    """Faqat sana (vaqtsiz)."""
+    if not value:
+        return "—"
+    if hasattr(value, "strftime"):
+        return value.strftime("%d.%m.%Y")
+    return str(value)
+
+
+def _days_label(due_date) -> str:
+    """Muddatga qancha kun qolganini yoki kechikkanini ko'rsatadi."""
+    if not due_date:
+        return ""
+    today = date.today()
+    delta = (due_date.date() if hasattr(due_date, "date") else due_date) - today
+    days = delta.days
+    if days < 0:
+        return f"  ⚠️ {abs(days)} kun kechikdi"
+    if days == 0:
+        return "  ⚠️ Bugun!"
+    if days <= 3:
+        return f"  ⚠️ {days} kun qoldi"
+    return ""
 
 
 def status_label(status: str, purchase_type: str = "paid") -> str:
@@ -73,11 +103,36 @@ def purchases_text(purchases: list, page: int, total: int) -> str:
         f"Sahifa: <b>{page}/{total_pages}</b>",
         "",
     ]
-    for index, purchase in enumerate(purchases, start=1):
+    for index, p in enumerate(purchases, start=1):
+        purchase_type = p.get("purchase_type", "paid")
+        status = status_label(p["status"], purchase_type)
+        price_str = format_price(p["amount"])
+
+        # Kupon belgisi
+        coupon_badge = ""
+        if p.get("coupon_code"):
+            pct = p.get("coupon_percent") or 0
+            coupon_badge = f"  🎟 −{pct}%" if pct else "  🎟 Kupon"
+
+        # Bo'lib to'lash holati
+        installment_badge = ""
+        if p.get("plan_id") and p.get("plan_total_count"):
+            paid_n = p.get("plan_paid_count") or 0
+            total_n = p["plan_total_count"]
+            plan_status = p.get("plan_status", "active")
+            if plan_status == "completed":
+                installment_badge = f"  📊 {paid_n}/{total_n} ✅"
+            else:
+                installment_badge = f"  📊 {paid_n}/{total_n} to'landi"
+                # Keyingi to'lov sanasi
+                nxt = p.get("next_due_date")
+                if nxt:
+                    installment_badge += f"  •  ⏰ {_fmt_date_short(nxt)}"
+
         lines.append(
-            f"{index}. <b>{html.quote(purchase['course_name'])}</b>\n"
-            f"   {status_label(purchase['status'], purchase.get('purchase_type', 'paid'))} | {format_price(purchase['amount'])}\n"
-            f"   Sana: {format_date(purchase['created_at'])}"
+            f"{index}. <b>{html.quote(p['course_name'])}</b>\n"
+            f"   {status}  •  {price_str}{coupon_badge}\n"
+            f"   📅 {_fmt_date_short(p['created_at'])}{installment_badge}"
         )
 
     lines.append("")
@@ -141,119 +196,164 @@ def purchases_keyboard(purchases: list, page: int, total: int) -> InlineKeyboard
 def purchase_detail_text(purchase, plan=None, payments=None) -> str:
     purchase_type = purchase.get("purchase_type", "paid")
     is_free_type = purchase_type == "free"
-    access_link = purchase["invite_link"] or (
-        purchase["course_free_telegram_link"] if is_free_type else purchase["course_telegram_link"]
-    ) or "-"
-    admin_note = purchase["admin_note"] or "-"
-    type_label = "🎁 Bepul kirish" if is_free_type else "💎 To'lov orqali"
-    coupon_line = ""
-    if purchase.get("coupon_code"):
-        coupon_line = f"\n🎟 Kupon: <code>{html.quote(purchase['coupon_code'])}</code>"
-        orig = purchase.get("original_amount", 0) or 0
-        disc = purchase.get("coupon_discount", 0) or 0
-        if disc:
-            coupon_line += f" (−{format_price(disc)}, asl narx: {format_price(orig)})"
+    real_access_link = purchase.get("invite_link") or (
+        purchase.get("course_free_telegram_link") if is_free_type
+        else purchase.get("course_telegram_link")
+    )
 
-    approved_line = ""
+    # ─── Sarlavha ────────────────────────────────────────────────────────────
+    type_label = "🎁 Bepul" if is_free_type else ("📅 Muddatli" if purchase.get("is_installment") else "💎 To'liq")
+    lines = [
+        f"📘 <b>{html.quote(purchase['course_name'])}</b>",
+        "",
+        f"Tur:   <b>{type_label}</b>",
+        f"Holat: <b>{status_label(purchase['status'], purchase_type)}</b>",
+        f"Sana:  <b>{_fmt_date_short(purchase.get('created_at'))}</b>",
+    ]
+    if purchase.get("approved_at"):
+        lines.append(f"Tasdiqlangan: <b>{_fmt_date_short(purchase.get('approved_at'))}</b>")
+
+    # ─── Narx bloki ──────────────────────────────────────────────────────────
+    orig = purchase.get("original_amount") or 0
+    disc = purchase.get("coupon_discount") or 0
+    final = purchase.get("amount") or 0
+    coupon_code = purchase.get("coupon_code") or ""
+
+    lines.append("")
+    lines.append("💰 <b>NARX MA'LUMOTLARI</b>")
+    if disc and orig:
+        lines.append(f"  Asl narx:       <b>{format_price(orig)}</b>")
+        lines.append(f"  🎟 Kupon <code>{html.quote(coupon_code)}</code>:  −<b>{format_price(disc)}</b>")
+        lines.append(f"  Siz to'ladingiz: <b>{format_price(final)}</b>")
+        lines.append(f"  💚 Tejashingiz:  <b>{format_price(disc)}</b>")
+    else:
+        lines.append(f"  To'lov summasi: <b>{format_price(final)}</b>")
+
+    # ─── Bo'lib to'lash jadvali ───────────────────────────────────────────────
+    if plan and payments:
+        paid_count   = sum(1 for p in payments if p["status"] == "paid")
+        total_count  = plan["installments_count"]
+        paid_amount  = sum(p["amount"] for p in payments if p["status"] == "paid")
+        remaining    = plan["total_amount"] - paid_amount
+
+        plan_status_str = "✅ Yakunlandi" if plan.get("status") == "completed" else f"{paid_count}/{total_count} to'landi"
+        lines.append("")
+        lines.append(f"📅 <b>MUDDATLI TO'LOV REJASI</b>  ({plan_status_str})")
+
+        for p in payments:
+            pnum = p["payment_number"]
+            amt  = format_price(p["amount"])
+            if p["status"] == "paid":
+                paid_on = _fmt_date_short(p.get("paid_at"))
+                lines.append(f"  ✅ {pnum}-to'lov: <b>{amt}</b>  ·  {paid_on}")
+            else:
+                due = p.get("due_date")
+                due_str = _fmt_date_short(due)
+                urgency = _days_label(due) if due else ""
+                if p.get("click_order_id"):
+                    lines.append(f"  ⏳ {pnum}-to'lov: <b>{amt}</b>  ·  {due_str}{urgency}  <i>(to'lov kutilmoqda)</i>")
+                else:
+                    lines.append(f"  ⏳ {pnum}-to'lov: <b>{amt}</b>  ·  {due_str}{urgency}")
+
+        lines.append("  ─────────────────────────────")
+        lines.append(f"  Jami narx:  <b>{format_price(plan['total_amount'])}</b>")
+        lines.append(f"  To'langan:  <b>{format_price(paid_amount)}</b>")
+        if remaining > 0:
+            lines.append(f"  Qolgan qarz: <b>{format_price(remaining)}</b>")
+        else:
+            lines.append("  Qolgan qarz: <b>✅ To'liq to'langan</b>")
+
+    # ─── Qo'shimcha kurs ma'lumotlari ────────────────────────────────────────
+    lines.append("")
+    if purchase.get("course_video_count"):
+        lines.append(f"🎬 Video darslar: <b>{purchase['course_video_count']} ta</b>")
+    if purchase.get("course_access_type"):
+        lines.append(f"🔓 Kirish turi: <b>{html.quote(purchase['course_access_type'])}</b>")
+
+    # ─── Holat xabari ────────────────────────────────────────────────────────
     if purchase["status"] == "approved":
-        if access_link:
-            approved_line = (
-                "\n\n🎉 <b>Kirish huquqi berilgan.</b>\n"
+        lines.append("")
+        if real_access_link:
+            lines.append(
+                "🎉 <b>Kirish huquqi berilgan.</b>\n"
                 "Pastdagi tugma orqali guruh yoki kanalga qo'shiling.\n"
                 "Kirgach pinned postni o'qing va darslarni tartib bilan o'rganing."
             )
         else:
-            approved_line = "\n\n🎉 <b>Kirish huquqi berilgan.</b>"
+            lines.append(
+                "🎉 <b>Kirish huquqi berilgan.</b>\n"
+                "Admin tez orada kurs linkini yuboradi."
+            )
     elif purchase["status"] == "pending":
+        lines.append("")
         if purchase.get("click_order_id"):
-            approved_line = (
-                "\n\n⏳ <b>CLICK to'lov kutilmoqda.</b>\n"
-                "To'lov tasdiqlangach kurs linki avtomatik yuboriladi."
-            )
+            lines.append("⏳ <b>CLICK to'lov kutilmoqda.</b>\nTo'lov tasdiqlangach kurs linki avtomatik yuboriladi.")
         else:
-            approved_line = (
-                "\n\n⏳ <b>To'lov tekshirilmoqda.</b>\n"
-                "Admin tasdiqlagach kurs linki avtomatik ko'rinadi."
-            )
+            lines.append("⏳ <b>To'lov tekshirilmoqda.</b>\nAdmin tasdiqlagach kurs linki avtomatik ko'rinadi.")
     elif purchase["status"] == "rejected":
-        admin_note_txt = purchase.get("admin_note") or "Rad etildi."
-        approved_line = f"\n\n❌ <b>To'lov rad etilgan.</b>\nSabab: {html.quote(admin_note_txt)}"
+        note = purchase.get("admin_note") or "Rad etildi."
+        lines.append(f"\n❌ <b>To'lov rad etilgan.</b>\nSabab: {html.quote(note)}")
 
-    installment_line = ""
-    if plan and payments:
-        paid_count = sum(1 for p in payments if p["status"] == "paid")
-        total_count = plan["installments_count"]
-        paid_amount = sum(p["amount"] for p in payments if p["status"] == "paid")
-        remaining_amount = plan["total_amount"] - paid_amount
-        remaining_str = format_price(remaining_amount) if remaining_amount > 0 else "✅ To'liq to'langan"
-        installment_line = (
-            f"\n\n📅 <b>Muddatli to'lov: {paid_count}/{total_count}</b>\n"
-            f"Kurs narxi: <b>{format_price(plan['total_amount'])}</b>\n"
-            f"To'langan: <b>{format_price(paid_amount)}</b>\n"
-            f"Qolgan qarz: <b>{remaining_str}</b>"
-        )
-        pending_payments = [p for p in payments if p["status"] == "pending"]
-        if pending_payments:
-            nxt = pending_payments[0]
-            due_str = nxt["due_date"].strftime("%d.%m.%Y") if nxt.get("due_date") else "—"
-            installment_line += (
-                f"\n\nKeyingi to'lov: <b>{format_price(nxt['amount'])}</b> "
-                f"({nxt['payment_number']}/{total_count}) – {due_str}"
-            )
-
-    return (
-        f"📘 <b>{html.quote(purchase['course_name'])}</b>\n\n"
-        f"Tur: <b>{type_label}</b>\n"
-        f"Holat: <b>{status_label(purchase['status'], purchase_type)}</b>\n"
-        f"Summa: <b>{format_price(purchase['amount'])}</b>"
-        f"{coupon_line}\n"
-        f"Video: <b>{purchase['course_video_count']} ta</b>\n"
-        f"Kirish: <b>{html.quote(purchase['course_access_type'])}</b>\n"
-        f"Sana: {format_date(purchase['created_at'])}\n"
-        f"Tasdiqlangan: {format_date(purchase['approved_at'])}\n"
-        f"Rad etilgan: {format_date(purchase['rejected_at'])}"
-        f"{installment_line}"
-        f"{approved_line}"
-    )
+    return "\n".join(lines)
 
 
 def purchase_detail_keyboard(purchase, page: int, plan=None, payments=None) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     purchase_type = purchase.get("purchase_type", "paid")
     is_free_type = purchase_type == "free"
-    access_link = purchase["invite_link"] or (
-        purchase.get("course_free_telegram_link") if is_free_type else purchase["course_telegram_link"]
+    access_link = purchase.get("invite_link") or (
+        purchase.get("course_free_telegram_link") if is_free_type
+        else purchase.get("course_telegram_link")
     )
 
     if purchase["status"] == "approved" and access_link:
         rows.append([
-            InlineKeyboardButton(text="🔗 Kursga qo'shilish", url=access_link, style=ButtonStyle.SUCCESS)
+            InlineKeyboardButton(text="🔗 Kursga qo'shilish", url=access_link)
         ])
 
     is_installment = purchase.get("is_installment", False)
 
     if is_installment and plan and payments:
         pending = [p for p in payments if p["status"] == "pending"]
+        has_active_click = any(p.get("click_order_id") for p in pending)
+
         if pending and purchase["status"] == "approved":
             nxt = pending[0]
-            has_click = bool(nxt.get("click_order_id"))
-            btn_text = "⏳ To'lov kutilmoqda (CLICK)" if has_click else "💳 Keyingi to'lovni amalga oshirish"
+            nxt_amt = format_price(nxt["amount"])
+            nxt_num = nxt["payment_number"]
+            total_count = plan["installments_count"]
+
+            if has_active_click:
+                next_btn_text = f"⏳ {nxt_num}/{total_count} — to'lov kutilmoqda"
+            else:
+                next_btn_text = f"💳 {nxt_num}/{total_count}-to'lov: {nxt_amt}"
+
             rows.append([
                 InlineKeyboardButton(
-                    text=btn_text,
+                    text=next_btn_text,
                     callback_data=NextInstallmentCallback(
                         plan_id=plan["id"], purchase_id=purchase["id"]
                     ).pack(),
-                    style=ButtonStyle.PRIMARY if has_click else ButtonStyle.SUCCESS,
                 )
             ])
+
+            # Muddatidan oldin to'lash — faqat 2+ pending bo'lganda
+            if len(pending) >= 2 and not has_active_click:
+                total_pending = sum(p["amount"] for p in pending)
+                rows.append([
+                    InlineKeyboardButton(
+                        text=f"⚡ Barcha qarzni to'lash: {format_price(total_pending)}",
+                        callback_data=EarlyRepaymentCallback(
+                            plan_id=plan["id"], purchase_id=purchase["id"]
+                        ).pack(),
+                    )
+                ])
 
     if purchase["status"] == "rejected" and not is_installment:
         rows.append([
             InlineKeyboardButton(
                 text="🔁 Qayta sotib olish",
                 callback_data=MyPurchaseActionCallback(action="retry", purchase_id=purchase["id"], page=page).pack(),
-                style=ButtonStyle.SUCCESS,
             )
         ])
 
@@ -448,6 +548,79 @@ async def my_purchase_retry(call: types.CallbackQuery, callback_data: MyPurchase
             ],
         ]
     )
+    if call.message.photo:
+        await call.message.delete()
+        await call.message.answer(text, reply_markup=markup)
+        return
+    await call.message.edit_text(text, reply_markup=markup)
+
+
+@router.callback_query(EarlyRepaymentCallback.filter())
+async def early_repayment_handler(
+    call: types.CallbackQuery,
+    callback_data: EarlyRepaymentCallback,
+):
+    """Muddatidan oldin barcha qarzni to'lash — bitta CLICK to'lov."""
+    await call.answer("Tayyorlanmoqda…")
+
+    plan_id = callback_data.plan_id
+    purchase_id = callback_data.purchase_id
+
+    # Qolgan pending to'lovlar soni va summasi
+    pending_info = await db.get_pending_installments_total(plan_id)
+    if not pending_info or pending_info["pending_count"] < 1:
+        await call.answer("Barcha to'lovlar allaqachon amalga oshirilgan.", show_alert=True)
+        return
+
+    pending_total = int(pending_info["pending_total"])
+    pending_count = int(pending_info["pending_count"])
+
+    # Plan va purchase ma'lumotlari
+    plan = await db.get_installment_plan(plan_id)
+    purchase = await db.select_purchase_by_id(purchase_id)
+    if not plan or not purchase:
+        await call.answer("Ma'lumotlar topilmadi.", show_alert=True)
+        return
+
+    course = await db.select_course(purchase["course_id"])
+    course_name = course["name"] if course else "Kurs"
+
+    # CLICK orqali umumiy qarz summasiga to'lov yaratish
+    result = await create_course_payment(
+        tg_id=call.from_user.id,
+        course_id=purchase["course_id"],
+        course_name=course_name,
+        course_link="",
+        amount=pending_total,
+    )
+    if not result or not result.get("payment_url"):
+        await call.answer("To'lov tizimida xatolik. Qayta urinib ko'ring.", show_alert=True)
+        return
+
+    click_order_id = int(result["order_id"])
+
+    # Barcha pending to'lovlarni ushbu click_order_id ga bog'lash
+    bound = await db.bind_early_repayment_click_order(plan_id, click_order_id)
+    if not bound:
+        await call.answer("Bog'lashda xatolik yuz berdi.", show_alert=True)
+        return
+
+    payment_url = result["payment_url"]
+    text = (
+        "⚡ <b>Muddatidan oldin to'lash</b>\n\n"
+        f"📚 Kurs: <b>{html.quote(course_name)}</b>\n"
+        f"📊 Qolgan to'lovlar: <b>{pending_count} ta</b>\n"
+        f"💰 Umumiy summa: <b>{format_price(pending_total)}</b>\n\n"
+        "Pastdagi tugmani bosib to'lovni amalga oshiring.\n"
+        "To'lov tasdiqlangach, barcha qarz avtomatik yopiladi."
+    )
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 CLICK orqali to'lash", url=payment_url)],
+        [InlineKeyboardButton(
+            text="↩️ Orqaga",
+            callback_data=MyPurchaseDetailCallback(purchase_id=purchase_id, page=1).pack(),
+        )],
+    ])
     if call.message.photo:
         await call.message.delete()
         await call.message.answer(text, reply_markup=markup)

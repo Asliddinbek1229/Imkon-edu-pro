@@ -606,7 +606,10 @@ class Database:
                     """
                     UPDATE purchases
                     SET status = 'approved',
-                        invite_link = COALESCE($2, invite_link),
+                        invite_link = COALESCE(
+                            $2,
+                            (SELECT telegram_link FROM courses WHERE courses.id = purchases.course_id)
+                        ),
                         approved_at = NOW(),
                         updated_at = NOW()
                     WHERE click_order_id = $1 AND status = 'pending'
@@ -799,10 +802,23 @@ class Database:
             c.free_telegram_link AS course_free_telegram_link,
             c.thumbnail AS course_thumbnail,
             c.video_count AS course_video_count,
-            c.access_type AS course_access_type
+            c.access_type AS course_access_type,
+            coup.code AS coupon_code,
+            coup.discount_percent AS coupon_percent,
+            ipl.id AS plan_id,
+            ipl.installments_count AS plan_total_count,
+            ipl.paid_count AS plan_paid_count,
+            ipl.status AS plan_status,
+            (
+                SELECT MIN(ip2.due_date)
+                FROM installment_payments ip2
+                WHERE ip2.plan_id = ipl.id AND ip2.status = 'pending' AND ip2.due_date IS NOT NULL
+            ) AS next_due_date
         FROM purchases p
         JOIN users u ON u.id = p.user_id
         JOIN courses c ON c.id = p.course_id
+        LEFT JOIN coupons coup ON coup.id = p.coupon_id
+        LEFT JOIN installment_plans ipl ON ipl.purchase_id = p.id
         WHERE u.telegram_id = $1 AND p.status = 'approved'
         ORDER BY p.created_at DESC, p.id DESC
         LIMIT $2 OFFSET $3;
@@ -1168,6 +1184,130 @@ class Database:
             """,
             plan_id, fetchrow=True,
         )
+
+    async def get_pending_installments_total(self, plan_id: int) -> dict | None:
+        """Qolgan barcha pending to'lovlar soni va umumiy summasi."""
+        return await self.execute(
+            """
+            SELECT COUNT(*) AS pending_count, COALESCE(SUM(amount), 0) AS pending_total
+            FROM installment_payments
+            WHERE plan_id = $1 AND status = 'pending';
+            """,
+            plan_id, fetchrow=True,
+        )
+
+    async def bind_early_repayment_click_order(
+        self, plan_id: int, click_order_id: int
+    ) -> int:
+        """Barcha pending to'lovlarni bitta click_order_id ga bog'lash.
+        Qaytaradi: bog'langan to'lovlar soni."""
+        result = await self.execute(
+            """
+            UPDATE installment_payments
+            SET click_order_id = $2
+            WHERE plan_id = $1 AND status = 'pending'
+            RETURNING id;
+            """,
+            plan_id, click_order_id, fetch=True,
+        )
+        return len(result) if result else 0
+
+    async def approve_early_repayment(
+        self, click_order_id: int, invite_link: str | None
+    ) -> dict | None:
+        """Muddatidan oldin to'lash: bitta CLICK orqali barcha pending to'lovlarni yopish.
+
+        Faqat 2+ pending to'lov bir xil click_order_id ga bog'langan bo'lsa ishlaydi.
+        Odatdagi bir martalik installment to'lovlari uchun None qaytaradi.
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                # Avval ushbu click_order_id ga nechta pending to'lov bog'liq ekanligini tekshirish
+                pending_count = await conn.fetchval(
+                    """
+                    SELECT COUNT(*) FROM installment_payments
+                    WHERE click_order_id = $1 AND status = 'pending';
+                    """,
+                    click_order_id,
+                )
+                # Agar faqat 1 ta bo'lsa — bu early repayment emas, oddiy installment
+                if not pending_count or pending_count < 2:
+                    return None
+
+                # Bu click_order_id ga bog'langan plan_id ni topish
+                plan_id = await conn.fetchval(
+                    """
+                    SELECT DISTINCT plan_id
+                    FROM installment_payments
+                    WHERE click_order_id = $1 AND status = 'pending'
+                    LIMIT 1;
+                    """,
+                    click_order_id,
+                )
+                if not plan_id:
+                    return None
+
+                # Plan ma'lumotlarini olish
+                plan = await conn.fetchrow(
+                    """
+                    SELECT ipl.*, p.coupon_id, p.id AS purchase_id,
+                           c.telegram_link AS course_telegram_link
+                    FROM installment_plans ipl
+                    JOIN purchases p ON p.id = ipl.purchase_id
+                    JOIN courses c ON c.id = p.course_id
+                    WHERE ipl.id = $1;
+                    """,
+                    plan_id,
+                )
+                if not plan:
+                    return None
+
+                # Barcha pending to'lovlarni to'langan deb belgilash
+                paid_rows = await conn.fetch(
+                    """
+                    UPDATE installment_payments
+                    SET status = 'paid', paid_at = NOW(),
+                        approved_by = 0, admin_note = 'Muddatidan oldin to''landi.'
+                    WHERE plan_id = $1 AND status = 'pending'
+                    RETURNING id;
+                    """,
+                    plan_id,
+                )
+                newly_paid = len(paid_rows)
+                if not newly_paid:
+                    return None
+
+                # paid_count ni to'g'irlab yangilash
+                await conn.execute(
+                    """
+                    UPDATE installment_plans
+                    SET paid_count = (
+                        SELECT COUNT(*) FROM installment_payments
+                        WHERE plan_id = $1 AND status = 'paid'
+                    ),
+                    status = 'completed'
+                    WHERE id = $1;
+                    """,
+                    plan_id,
+                )
+
+                # Purchase ni tasdiqlash (agar hali pending bo'lsa)
+                link = invite_link or plan["course_telegram_link"]
+                await conn.execute(
+                    """
+                    UPDATE purchases
+                    SET status = 'approved',
+                        invite_link = COALESCE($2, invite_link),
+                        approved_at = NOW(), updated_at = NOW()
+                    WHERE id = $1 AND status IN ('pending', 'approved');
+                    """,
+                    plan["purchase_id"], link,
+                )
+
+                # Kupon hisobini oshirish (agar hali oshirilmagan bo'lsa)
+                # (odatda 1-to'lovda allaqachon oshirilgan, lekin xavfsizlik uchun)
+
+        return await self.get_installment_plan(plan_id)
 
     async def get_installment_payment_detail(self, installment_payment_id: int) -> dict | None:
         sql = """

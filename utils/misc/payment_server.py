@@ -16,27 +16,28 @@ def _fmt(price: int) -> str:
 
 
 async def _notify_regular_approved(purchase) -> None:
+    # invite_link — tasdiqlashda saqlanadi; course_telegram_link — fallback
     access_link = purchase.get("invite_link") or purchase.get("course_telegram_link")
+    if access_link:
+        body = (
+            "Kursga kirish huquqi berildi.\n"
+            "Pastdagi tugma orqali guruhga/kanalga qo'shiling.\n"
+            "Kirgach pinned postni o'qing va darslarni tartib bilan o'rganing."
+        )
+    else:
+        body = "Kursga kirish huquqi berildi.\nAdmin tez orada kurs linkini yuboradi."
+
     text = (
         "✅ <b>To'lov tasdiqlandi!</b>\n\n"
         f"📚 Kurs: <b>{html.quote(purchase['course_name'])}</b>\n"
         f"💰 Summa: <b>{_fmt(purchase['amount'])}</b>\n\n"
-        "Kursga kirish huquqi berildi.\n"
-        + ("Pastdagi tugma orqali guruhga/kanalga qo'shiling.\n"
-           "Kirgach pinned postni o'qing va darslarni tartib bilan o'rganing."
-           if access_link else
-           "Admin tez orada kurs linkini yuboradi.")
+        f"{body}"
     )
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-    from aiogram.enums import ButtonStyle
     markup = None
     if access_link:
         markup = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(
-                text="🔗 Kursga qo'shilish",
-                url=access_link,
-                style=ButtonStyle.SUCCESS,
-            )
+            InlineKeyboardButton(text="🔗 Kursga qo'shilish", url=access_link)
         ]])
     try:
         await bot.send_message(
@@ -62,22 +63,19 @@ async def _notify_installment_approved(detail) -> None:
     if is_first:
         purchase = await db.select_purchase_by_id(detail["purchase_id"])
         access_link = (purchase or {}).get("invite_link") or detail.get("course_telegram_link")
+        join_line = "Pastdagi tugma orqali kursga qo'shiling." if access_link else "Admin tez orada kurs linkini yuboradi."
         text = (
             "✅ <b>Birinchi to'lov tasdiqlandi!</b>\n\n"
             f"📚 Kurs: <b>{html.quote(detail['course_name'])}</b>\n"
             f"💰 To'langan: <b>{_fmt(paid_amount)}</b> (1/{total_count}-qism)\n"
             f"💳 Qolgan qarz: <b>{_fmt(remaining)}</b>\n\n"
-            "Kursga kirish huquqi berildi.\n"
-            + ("Pastdagi tugma orqali kursga qo'shiling." if access_link else "")
+            f"Kursga kirish huquqi berildi.\n{join_line}"
         )
         from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-        from aiogram.enums import ButtonStyle
         markup = None
         if access_link:
             markup = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="🔗 Kursga qo'shilish", url=access_link, style=ButtonStyle.SUCCESS
-                )
+                InlineKeyboardButton(text="🔗 Kursga qo'shilish", url=access_link)
             ]])
     else:
         is_complete = (paid_count >= total_count)
@@ -103,6 +101,31 @@ async def _notify_installment_approved(detail) -> None:
         await bot.send_message(chat_id=detail["telegram_id"], text=text, reply_markup=markup)
     except Exception as exc:
         logger.warning("Installment notification failed tg_id=%s: %s", detail.get("telegram_id"), exc)
+
+
+async def _notify_early_repayment_approved(plan) -> None:
+    """Muddatidan oldin to'liq to'lash tasdiqlanganda bildirishnoma."""
+    purchase = await db.select_purchase_by_id(plan["purchase_id"])
+    if not purchase:
+        return
+    access_link = purchase.get("invite_link") or purchase.get("course_telegram_link")
+    text = (
+        "✅ <b>Barcha qarz muddatidan oldin to'landi!</b>\n\n"
+        f"📚 Kurs: <b>{html.quote(purchase['course_name'])}</b>\n"
+        f"💰 Jami to'langan: <b>{_fmt(plan['total_amount'])}</b>\n\n"
+        "Kurs bo'yicha barcha to'lovlar yakunlandi. Rahmat!"
+        + ("\nPastdagi tugma orqali kursda davom eting." if access_link else "")
+    )
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    markup = None
+    if access_link:
+        markup = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔗 Kursga o'tish", url=access_link)
+        ]])
+    try:
+        await bot.send_message(chat_id=purchase["telegram_id"], text=text, reply_markup=markup)
+    except Exception as exc:
+        logger.warning("Early repayment notify failed tg_id=%s: %s", purchase.get("telegram_id"), exc)
 
 
 async def handle_purchase_confirm(request: web.Request) -> web.Response:
@@ -147,7 +170,25 @@ async def handle_purchase_confirm(request: web.Request) -> web.Response:
         await _notify_regular_approved(purchase)
         return web.json_response({"success": True, "purchase_id": purchase["id"]})
 
-    # 2. Bo'lib to'lash to'lovini tekshirish
+    # 2. Muddatidan oldin to'lash (2+ pending bir xil click_order_id)
+    try:
+        plan = await db.approve_early_repayment(
+            click_order_id=click_order_id,
+            invite_link=invite_link,
+        )
+    except Exception as exc:
+        logger.error("approve_early_repayment error: %s | click_order_id=%s", exc, click_order_id)
+        return web.json_response({"error": "DB error"}, status=500)
+
+    if plan:
+        logger.info(
+            "Early repayment approved | plan_id=%s | click_order_id=%s",
+            plan["id"], click_order_id,
+        )
+        await _notify_early_repayment_approved(plan)
+        return web.json_response({"success": True, "plan_id": plan["id"]})
+
+    # 3. Oddiy bo'lib to'lash (bitta installment payment)
     try:
         detail = await db.approve_installment_by_click(
             click_order_id=click_order_id,
