@@ -139,13 +139,12 @@ def purchases_text(purchases: list, page: int, total: int) -> str:
                 due_str = f"  ⏰ {_fmt_date_short(nxt)}{urgency}" if nxt else ""
                 install_line = f"\n     └ [{bar}] {paid_n}/{plan_total}{due_str}"
 
-        lines.append(
+        block = (
             f"<b>{index}.</b> {status_icon} <b>{html.quote(p['course_name'])}</b>\n"
-            f"     💰 {price_str}   📅 {_fmt_date_short(p['created_at'])}"
+            f"💰 {price_str}   📅 {_fmt_date_short(p['created_at'])}"
             f"{install_line}"
         )
-        if index < len(purchases):
-            lines.append("")   # kurslar orasida bo'sh qator
+        lines.append(f"<blockquote>{block}</blockquote>")
 
     lines += ["", "👇 Batafsil ko'rish uchun raqamni tanlang:"]
     return "\n".join(lines)
